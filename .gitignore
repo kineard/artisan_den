@@ -1,0 +1,16 @@
+# Config (may contain DB credentials)
+config.php
+
+# Logs and debug
+*.log
+server.log
+.cursor/
+
+# OS and editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Optional: uncomment if you use Composer
+# vendor/

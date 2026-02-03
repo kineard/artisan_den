@@ -1,0 +1,36 @@
+-- Artisan Den KPI System Database Schema
+CREATE TABLE IF NOT EXISTS stores (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS daily_kpis (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    store_id INT NOT NULL,
+    entry_date DATE NOT NULL,
+    bank_balance DECIMAL(10,2) DEFAULT 0.00,
+    safe_balance DECIMAL(10,2) DEFAULT 0.00,
+    sales_today DECIMAL(10,2) DEFAULT 0.00,
+    cogs_today DECIMAL(10,2) DEFAULT 0.00,
+    labor_today DECIMAL(10,2) DEFAULT 0.00,
+    avg_daily_overhead DECIMAL(10,2) DEFAULT 0.00,
+    updated_by VARCHAR(100) DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_store_date (store_id, entry_date),
+    FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS lightspeed_imports (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    filename VARCHAR(255) NOT NULL,
+    import_date DATE NOT NULL,
+    records_imported INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+INSERT INTO stores (name) VALUES ('23rd St'), ('Pier Park') ON DUPLICATE KEY UPDATE name=name;
