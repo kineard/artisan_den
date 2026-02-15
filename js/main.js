@@ -1,4 +1,13 @@
 document.addEventListener('DOMContentLoaded', function() {
+    // Load KPI chart data from hidden textarea (no script tag = no parse error)
+    var kpiDataEl = document.getElementById('kpi-chart-data');
+    if (kpiDataEl) {
+        var j = (kpiDataEl.value || kpiDataEl.textContent || '').trim();
+        try { window.chartData = j ? JSON.parse(j) : null; } catch (e) { window.chartData = null; }
+    } else {
+        window.chartData = null;
+    }
+
     // Handle spreadsheet inputs
     const spreadsheetInputs = document.querySelectorAll('.spreadsheet-input');
     spreadsheetInputs.forEach(input => {
@@ -13,8 +22,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const storePills = document.querySelectorAll('.store-pill');
     storePills.forEach(pill => {
         pill.addEventListener('click', function(e) {
-            e.preventDefault();
             const storeId = this.dataset.storeId;
+            if (!storeId) {
+                // Let regular anchor navigation work when no data-store-id is provided.
+                return;
+            }
+            e.preventDefault();
             const url = new URL(window.location);
             url.searchParams.set('store', storeId);
             window.location.href = url.toString();
@@ -31,15 +44,26 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
-    // Initialize chart (or attach legend/controls if chart was already created inline)
-    if (window.kpiChart) {
-        kpiChart = window.kpiChart;
-        if (typeof createCustomLegend === 'function') createCustomLegend();
-        if (typeof setupChartControls === 'function') setupChartControls();
-    } else {
-        initializeChart();
+    // Initialize KPI chart after one frame so canvas has layout and non-zero size
+    function runKpiChartInit() {
+        if (getKpiChart()) {
+            kpiChart = getKpiChart();
+            if (typeof createCustomLegend === 'function') createCustomLegend();
+            if (typeof setupChartControls === 'function') setupChartControls();
+            return;
+        }
+        if (!initializeChart() && typeof Chart === 'undefined') {
+            var attempts = 0;
+            var t = setInterval(function() {
+                if (initializeChart() || ++attempts > 40) clearInterval(t);
+            }, 100);
+        }
     }
-    
+    requestAnimationFrame(runKpiChartInit);
+
+    // Inventory chart (data from #inventory-chart-data)
+    initInventoryChartFromData();
+
     // Daily on-hand cell saves (legacy onhand-cell-input)
     document.querySelectorAll('.onhand-cell-input').forEach(function(el) {
         el.addEventListener('change', saveOnHandCell);
@@ -47,8 +71,8 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     // V2: daily sales inputs
     document.querySelectorAll('.daily-sale-input').forEach(function(el) {
+        // change already fires when tabbing out after edit; avoid duplicate blur submit
         el.addEventListener('change', saveDailySale);
-        el.addEventListener('blur', saveDailySale);
     });
     // V2: daily purchases (manual part; total = received + manual)
     document.querySelectorAll('.daily-purchase-input').forEach(function(el) {
@@ -65,6 +89,17 @@ document.addEventListener('DOMContentLoaded', function() {
     if (btnUpdateDailyOnHand) {
         btnUpdateDailyOnHand.addEventListener('click', updateDailyOnHandAll);
     }
+    // Order button in Qty Ordered column: open same Add Order modal with this row's product/vendor pre-filled
+    document.addEventListener('click', function(e) {
+        var btn = e.target && e.target.closest ? e.target.closest('.order-row-btn') : null;
+        if (!btn) return;
+        e.preventDefault();
+        var productId = btn.getAttribute('data-product-id') || '';
+        var vendorId = btn.getAttribute('data-vendor-id') || '';
+        var unitCost = btn.getAttribute('data-unit-cost');
+        var suggestedQty = btn.getAttribute('data-suggested-qty');
+        openOrderModal(productId ? parseInt(productId, 10) : null, vendorId ? parseInt(vendorId, 10) : null, unitCost !== null && unitCost !== '' ? parseFloat(unitCost) : 0, suggestedQty !== null && suggestedQty !== '' ? parseInt(suggestedQty, 10) : 0);
+    });
     // Scroll to inventory chart when arriving via SKU link (#inventory-chart)
     if (window.location.hash === '#inventory-chart') {
         const chartEl = document.getElementById('inventory-chart');
@@ -74,6 +109,71 @@ document.addEventListener('DOMContentLoaded', function() {
             }, 150);
         }
     }
+    // Inventory form: ensure product_id is set (Add mode) and avoid browser validating hidden/visible select
+    const inventoryForm = document.getElementById('inventoryForm');
+    if (inventoryForm) {
+        inventoryForm.addEventListener('submit', function(e) {
+            var inventoryIdInput = document.getElementById('inventory_id');
+            var productSkuInput = document.getElementById('product_sku');
+            if (inventoryIdInput && inventoryIdInput.value && productSkuInput) {
+                var original = (productSkuInput.getAttribute('data-original-sku') || '').trim();
+                var current = (productSkuInput.value || '').trim();
+                if (current !== original) {
+                    if (!confirm('You are changing the product SKU/Barcode. The new value must be unique. Continue?')) {
+                        e.preventDefault();
+                        return false;
+                    }
+                }
+            }
+            var productSelector = document.getElementById('inventory-product-selector');
+            var productIdHidden = document.getElementById('inventory_product_id');
+            var productIdSelect = document.getElementById('inventory_product_id_select');
+            if (productSelector && productSelector.style.display !== 'none' && productIdSelect) {
+                productIdHidden.value = productIdSelect.value || '';
+            }
+            if (!productIdHidden.value || productIdHidden.value === '') {
+                e.preventDefault();
+                alert('Please select a product.');
+                return false;
+            }
+        });
+    }
+    // Receive order modal: submit via fetch
+    const receiveForm = document.getElementById('receiveOrderForm');
+    if (receiveForm) {
+        receiveForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const qtyInput = document.getElementById('receive_quantity');
+            const qty = qtyInput ? Number(qtyInput.value) : 0;
+            const maxQty = qtyInput ? Number(qtyInput.max || 0) : 0;
+            if (!Number.isFinite(qty) || qty <= 0) {
+                alert('Please enter a received quantity greater than 0.');
+                return;
+            }
+            if (maxQty > 0 && qty > maxQty) {
+                alert('Received qty cannot exceed ordered qty.');
+                return;
+            }
+            const formData = new FormData(receiveForm);
+            fetch('index.php', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        closeReceiveOrderModal();
+                        window.location.reload();
+                    } else {
+                        alert('Error: ' + (data.message || 'Failed to mark order as received'));
+                    }
+                })
+                .catch(function() { alert('Error marking order as received'); });
+        });
+    }
+
+    // Close Edit vendor dropdown when clicking outside
+    document.addEventListener('click', function(e) {
+        var dropdown = document.querySelector('.vendor-edit-dropdown');
+        if (dropdown && !dropdown.contains(e.target)) closeVendorEditDropdown();
+    });
 });
 
 function updateComputedValuesForDate(event) {
@@ -210,13 +310,10 @@ function getKpiChart() {
         var bound = Chart.getChart(canvas);
         if (bound) {
             kpiChart = bound;
-            if (window.kpiChart !== bound) window.kpiChart = bound;
             return bound;
         }
     }
-    var ch = kpiChart || window.kpiChart || null;
-    if (ch && !kpiChart) kpiChart = ch;
-    return ch;
+    return kpiChart || null;
 }
 
 function initializeChart() {
@@ -229,6 +326,8 @@ function initializeChart() {
         const emptyData = { labels: labels, datasets: [{ label: 'Sales', data: [0], borderColor: 'rgb(52, 152, 219)', backgroundColor: 'rgba(52, 152, 219, 0.1)', fill: true, tension: 0.4, hidden: false }] };
         if (kpiChart) kpiChart.destroy();
         kpiChart = new Chart(chartCanvas.getContext('2d'), { type: 'line', data: emptyData, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
+        createCustomLegend();
+        setupChartControls();
         return;
     }
     const ctx = chartCanvas.getContext('2d');
@@ -296,6 +395,7 @@ function initializeChart() {
 
     // Add show all / hide all buttons
     setupChartControls();
+    return true;
 }
 
 function setupChartControls() {
@@ -329,31 +429,34 @@ function setupChartControls() {
         });
     }
 
-    updateKpiButtonStates();
+    var ch = getKpiChart();
+    if (ch && typeof ch.getDatasetMeta === 'function') updateKpiButtonStates();
 }
 
 function setKpiDatasetVisibility(ch, index, visible) {
+    if (!ch || typeof ch.getDatasetMeta !== 'function') return;
     if (typeof ch.setDatasetVisibility === 'function') {
         ch.setDatasetVisibility(index, visible);
         return;
     }
     var meta = ch.getDatasetMeta(index);
     if (meta) meta.hidden = !visible;
-    if (ch.data.datasets[index]) ch.data.datasets[index].hidden = !visible;
+    if (ch.data && ch.data.datasets && ch.data.datasets[index]) ch.data.datasets[index].hidden = !visible;
 }
 
 function getKpiDatasetVisible(ch, index) {
+    if (!ch || typeof ch.getDatasetMeta !== 'function') return true;
     if (typeof ch.isDatasetVisible === 'function') return ch.isDatasetVisible(index);
     var meta = ch.getDatasetMeta(index);
     if (meta && typeof meta.hidden === 'boolean') return !meta.hidden;
-    var ds = ch.data.datasets[index];
+    var ds = ch.data && ch.data.datasets && ch.data.datasets[index];
     if (ds && typeof ds.hidden === 'boolean') return !ds.hidden;
     return true;
 }
 
 function showAllDatasets() {
     var ch = getKpiChart();
-    if (!ch) return;
+    if (!ch || !ch.data || !ch.data.datasets) return;
     for (var i = 0; i < ch.data.datasets.length; i++) setKpiDatasetVisibility(ch, i, true);
     ch.update('none');
     updateLegendStates();
@@ -361,7 +464,7 @@ function showAllDatasets() {
 
 function hideAllDatasets() {
     var ch = getKpiChart();
-    if (!ch) return;
+    if (!ch || !ch.data || !ch.data.datasets) return;
     for (var i = 0; i < ch.data.datasets.length; i++) setKpiDatasetVisibility(ch, i, false);
     ch.update('none');
     updateLegendStates();
@@ -383,7 +486,7 @@ function updateLegendStates() {
 
 function updateKpiButtonStates() {
     var ch = getKpiChart();
-    if (!ch) return;
+    if (!ch || !ch.data || !ch.data.datasets || typeof ch.getDatasetMeta !== 'function') return;
     document.querySelectorAll('.kpi-series-btn').forEach(function(btn) {
         var index = parseInt(btn.getAttribute('data-index'), 10);
         if (isNaN(index)) return;
@@ -403,6 +506,11 @@ function toggleChartCollapse() {
         if (isCollapsed) {
             content.classList.remove('collapsed');
             icon.textContent = '▼';
+            // Resize chart when section is shown so it draws correctly
+            var ch = getKpiChart();
+            if (ch && typeof ch.resize === 'function') {
+                setTimeout(function() { ch.resize(); }, 50);
+            }
         } else {
             content.classList.add('collapsed');
             icon.textContent = '▶';
@@ -480,6 +588,7 @@ function showVendorModal(vendorId = null) {
                 document.getElementById('vendor_rating').value = String(rating);
                 document.getElementById('is_preferred').checked = !!v.is_preferred;
                 document.getElementById('is_active').checked = v.is_active !== false;
+                modal.style.display = 'block';
             })
             .catch(e => { console.error(e); alert('Could not load vendor.'); });
     } else {
@@ -488,13 +597,28 @@ function showVendorModal(vendorId = null) {
         document.getElementById('vendor_id').value = '';
         document.getElementById('vendor_rating').value = '3';
         document.getElementById('is_active').checked = true;
+        modal.style.display = 'block';
     }
-    
-    modal.style.display = 'block';
 }
 
 function closeVendorModal() {
     document.getElementById('vendorModal').style.display = 'none';
+}
+
+function toggleVendorEditDropdown() {
+    var el = document.querySelector('.vendor-edit-dropdown');
+    if (!el) return;
+    el.classList.toggle('open');
+}
+
+function selectVendorToEdit(vendorId) {
+    closeVendorEditDropdown();
+    showVendorModal(vendorId);
+}
+
+function closeVendorEditDropdown() {
+    var el = document.querySelector('.vendor-edit-dropdown');
+    if (el) el.classList.remove('open');
 }
 
 function editInventory(inventoryId) {
@@ -518,10 +642,10 @@ function editInventory(inventoryId) {
             inventoryIdInput.value = inv.id || '';
             productIdHidden.value = inv.product_id || '';
             document.getElementById('on_hand').value = inv.on_hand != null ? Math.round(parseFloat(inv.on_hand)) : '';
-            document.getElementById('avg_daily_usage').value = inv.avg_daily_usage ?? '';
+            document.getElementById('avg_daily_usage').value = inv.avg_daily_usage != null ? Math.round(parseFloat(inv.avg_daily_usage)) : '';
             document.getElementById('days_of_stock').value = inv.days_of_stock ?? 7;
-            document.getElementById('reorder_point').value = inv.reorder_point ?? '';
-            document.getElementById('target_max').value = inv.target_max ?? '';
+            document.getElementById('reorder_point').value = inv.reorder_point != null ? Math.round(parseFloat(inv.reorder_point)) : '';
+            document.getElementById('target_max').value = inv.target_max != null ? Math.round(parseFloat(inv.target_max)) : '';
             document.getElementById('substitution_product_id').value = inv.substitution_product_id || '';
             const subSelect = document.getElementById('substitution_product_id');
             [].forEach.call(subSelect.options, function(opt) {
@@ -534,9 +658,17 @@ function editInventory(inventoryId) {
             document.getElementById('lead_time_days').value = inv.lead_time_days ?? 0;
             document.getElementById('unit_cost').value = inv.unit_cost ?? '';
             document.getElementById('inventory_notes').value = inv.notes || '';
+            var skuRow = document.getElementById('inventory-edit-sku-row');
+            var skuInput = document.getElementById('product_sku');
+            if (skuRow && skuInput) {
+                skuRow.style.display = 'block';
+                var skuVal = (inv.sku || '').trim();
+                skuInput.value = skuVal;
+                skuInput.setAttribute('data-original-sku', skuVal);
+            }
+            modal.style.display = 'block';
         })
         .catch(e => { console.error(e); alert('Could not load inventory.'); });
-    modal.style.display = 'block';
 }
 
 function closeInventoryModal() {
@@ -565,6 +697,10 @@ function showInventoryModal() {
     if (productSelector) {
         productSelector.style.display = 'block';
     }
+    var skuRow = document.getElementById('inventory-edit-sku-row');
+    if (skuRow) skuRow.style.display = 'none';
+    var skuInput = document.getElementById('product_sku');
+    if (skuInput) { skuInput.value = ''; skuInput.removeAttribute('data-original-sku'); }
     
     // Update hidden product_id when select changes
     if (productIdSelect && productIdHidden) {
@@ -597,13 +733,47 @@ function showAddProductToGridModal() {
     showInventoryModal();
 }
 
-function createOrder(productId, vendorId, unitCost, suggestedQty) {
+function openOrderModal(productId, vendorId, unitCost, suggestedQty) {
     const modal = document.getElementById('orderModal');
-    document.getElementById('order_quantity').value = suggestedQty || 0;
-    document.getElementById('order_unit_cost').value = unitCost || 0;
-    document.getElementById('order_product_id').value = productId || '';
-    document.getElementById('order_vendor_id').value = vendorId || '';
+    if (!modal) return;
+    const productEl = document.getElementById('order_product_id');
+    const vendorEl = document.getElementById('order_vendor_id');
+    if (productEl) productEl.value = productId || '';
+    if (vendorEl) vendorEl.value = vendorId || '';
+    const qtyEl = document.getElementById('order_quantity');
+    const costEl = document.getElementById('order_unit_cost');
+    const dateEl = document.getElementById('order_date');
+    if (qtyEl) qtyEl.value = suggestedQty != null && suggestedQty !== '' ? suggestedQty : 0;
+    if (costEl) costEl.value = unitCost != null && unitCost !== '' ? unitCost : 0;
+    if (dateEl) dateEl.value = new Date().toISOString().slice(0, 10);
     modal.style.display = 'block';
+}
+
+function createOrder(productId, vendorId, unitCost, suggestedQty) {
+    openOrderModal(productId, vendorId, unitCost, suggestedQty);
+}
+
+function openReceiveOrderModal(orderId, productId, storeId, orderQty) {
+    const modal = document.getElementById('receiveOrderModal');
+    if (!modal) return;
+    const qtyEl = document.getElementById('receive_quantity');
+    const orderedQtyLabel = document.getElementById('receive_order_qty_label');
+    const safeOrderQty = Number.isFinite(Number(orderQty)) ? Number(orderQty) : 0;
+    document.getElementById('receive_order_id').value = orderId;
+    document.getElementById('receive_product_id').value = productId;
+    document.getElementById('receive_store_id').value = storeId;
+    if (qtyEl) {
+        qtyEl.value = safeOrderQty;
+        qtyEl.max = String(safeOrderQty);
+    }
+    if (orderedQtyLabel) orderedQtyLabel.textContent = String(Math.round(safeOrderQty));
+    document.getElementById('receive_date').value = new Date().toISOString().slice(0, 10);
+    modal.style.display = 'block';
+}
+
+function closeReceiveOrderModal() {
+    const modal = document.getElementById('receiveOrderModal');
+    if (modal) modal.style.display = 'none';
 }
 
 function markOrderReceived(orderId, productId, storeId, quantity) {
@@ -643,7 +813,7 @@ function closeOrderModal() {
 
 // Close modals when clicking outside
 window.onclick = function(event) {
-    const modals = ['productModal', 'vendorModal', 'inventoryModal', 'orderModal'];
+    const modals = ['productModal', 'vendorModal', 'inventoryModal', 'orderModal', 'receiveOrderModal'];
     modals.forEach(modalId => {
         const modal = document.getElementById(modalId);
         if (event.target === modal) {
@@ -655,6 +825,7 @@ window.onclick = function(event) {
 function changeInventorySort(sortBy) {
     const url = new URL(window.location);
     url.searchParams.set('inventory_sort', sortBy);
+    if (!url.searchParams.has('inventory_limit')) url.searchParams.set('inventory_limit', '10');
     window.location.href = url.toString();
 }
 
@@ -666,11 +837,11 @@ function calculateInventoryTargets() {
     if (avgDailyUsage > 0) {
         // Calculate reorder point: (avg daily usage * lead time) + (avg daily usage * days of stock)
         const reorderPoint = (avgDailyUsage * leadTimeDays) + (avgDailyUsage * daysOfStock);
-        document.getElementById('reorder_point').value = reorderPoint.toFixed(2);
+        document.getElementById('reorder_point').value = Math.round(reorderPoint);
         
         // Calculate target max: avg daily usage * days of stock
         const targetMax = avgDailyUsage * daysOfStock;
-        document.getElementById('target_max').value = targetMax.toFixed(2);
+        document.getElementById('target_max').value = Math.round(targetMax);
     }
 }
 
@@ -685,8 +856,8 @@ function saveOnHandCell(ev) {
     if (!storeId || !productId || !date) return;
     if (val !== '' && (isNaN(onHand) || onHand < 0)) return;
     
-    const entryDateEl = document.getElementById('entry-date');
-    const entryDate = entryDateEl ? entryDateEl.value : '';
+    const kpiDateEl = document.getElementById('entry-date');
+    const kpiDate = kpiDateEl ? kpiDateEl.value : '';
 
     const formData = new FormData();
     formData.append('save_snapshot', '1');
@@ -694,7 +865,7 @@ function saveOnHandCell(ev) {
     formData.append('product_id', productId);
     formData.append('snapshot_date', date);
     formData.append('on_hand', onHand);
-    if (entryDate) formData.append('entry_date', entryDate);
+    if (kpiDate) formData.append('entry_date', kpiDate);
 
     fetch(window.location.href, { method: 'POST', body: formData })
         .then(function(r) { return r.json(); })
@@ -719,6 +890,11 @@ function saveDailySale(ev) {
     formData.append('product_id', productId);
     formData.append('sale_date', date);
     formData.append('quantity', quantity);
+    const reqToken = String(Date.now()) + Math.random().toString(36).slice(2);
+    input.dataset.saleReqToken = reqToken;
+    if (!input.dataset.originalTitle) input.dataset.originalTitle = input.title || '';
+    input.classList.add('is-saving');
+    input.title = 'Saving...';
     fetch(window.location.href, { method: 'POST', body: formData })
         .then(function(r) { return r.json(); })
         .then(function(data) {
@@ -726,32 +902,62 @@ function saveDailySale(ev) {
                 console.warn('Save daily sale failed', data.message);
                 return;
             }
-            // Recalc On Hand for the date range so the table updates
-            recalcOnHandThenReload(storeId);
+            // Recalc On Hand from the edited day forward (faster than full-range recalc)
+            return recalcOnHandThenReload(storeId, date);
         })
-        .catch(function(e) { console.error('Save daily sale error', e); });
+        .catch(function(e) { console.error('Save daily sale error', e); })
+        .finally(function() {
+            // Only clear if this is still the latest request for this input
+            if (input.dataset.saleReqToken === reqToken) {
+                input.classList.remove('is-saving');
+                input.title = input.dataset.originalTitle || 'Sales';
+                delete input.dataset.saleReqToken;
+            }
+        });
+}
+
+function getInventoryGridRangeMeta() {
+    var inputs = Array.from(document.querySelectorAll('.daily-sale-input[data-date]'));
+    if (!inputs.length) return null;
+    var storeId = (inputs[0].dataset && inputs[0].dataset.storeId) ? inputs[0].dataset.storeId : null;
+    var dates = inputs
+        .map(function(el) { return el.dataset ? el.dataset.date : null; })
+        .filter(function(d) { return !!d; });
+    if (!dates.length) return null;
+    dates.sort();
+    return {
+        storeId: storeId,
+        startDate: dates[0],
+        endDate: dates[dates.length - 1]
+    };
 }
 
 // Call update_daily_on_hand for current grid range; then reload so On Hand always shows updated values
-function recalcOnHandThenReload(storeId) {
+function recalcOnHandThenReload(storeId, startDateOverride) {
     const btn = document.getElementById('btn-update-daily-onhand');
-    if (!btn) return;
-    const startDate = btn.dataset.startDate;
-    const endDate = btn.dataset.endDate;
-    if (!storeId || !startDate || !endDate) return;
+    const gridMeta = getInventoryGridRangeMeta();
+    const startDate = startDateOverride || ((btn && btn.dataset && btn.dataset.startDate) ? btn.dataset.startDate : (gridMeta ? gridMeta.startDate : null));
+    const endDate = (btn && btn.dataset && btn.dataset.endDate) ? btn.dataset.endDate : (gridMeta ? gridMeta.endDate : null);
+    const effectiveStoreId = storeId || (btn && btn.dataset && btn.dataset.storeId ? btn.dataset.storeId : (gridMeta ? gridMeta.storeId : null));
+    if (!effectiveStoreId || !startDate || !endDate) return Promise.resolve(null);
     const formData = new FormData();
     formData.append('update_daily_on_hand', '1');
-    formData.append('store_id', storeId);
+    formData.append('store_id', effectiveStoreId);
     formData.append('start_date', startDate);
     formData.append('end_date', endDate);
-    fetch(window.location.href, { method: 'POST', body: formData })
+    return fetch(window.location.href, { method: 'POST', body: formData })
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.success) {
-                window.location.reload();
+                if (data.snapshots && typeof data.snapshots === 'object') {
+                    updateOnHandCellsInPlace(data.snapshots);
+                } else {
+                    window.location.reload();
+                }
             }
+            return data;
         })
-        .catch(function(e) { console.error('Recalc on hand error', e); });
+        .catch(function(e) { console.error('Recalc on hand error', e); return null; });
 }
 
 // Update each On Hand cell in the table from snapshots map { product_id: { date: on_hand } }; whole numbers only
@@ -944,7 +1150,7 @@ function updateInventoryRowStatus(row, onHand) {
 let legendClickHandler = null;
 
 function createCustomLegend() {
-    if (!kpiChart) return;
+    if (!kpiChart || !kpiChart.data || !kpiChart.data.datasets) return;
     
     const legendContainer = document.getElementById('chart-legend');
     if (!legendContainer) return;
@@ -1007,10 +1213,89 @@ function createCustomLegend() {
 
 function toggleDataset(index, legendItem) {
     var ch = getKpiChart();
-    if (!ch) return;
-    if (index < 0 || index >= (ch.data.datasets && ch.data.datasets.length)) return;
+    if (!ch || !ch.data || !ch.data.datasets) return;
+    if (index < 0 || index >= ch.data.datasets.length) return;
     var visible = getKpiDatasetVisible(ch, index);
     setKpiDatasetVisibility(ch, index, !visible);
     ch.update('none');
     updateLegendStates();
+}
+
+// Inventory chart (data from #inventory-chart-data; no inline script in HTML)
+function initInventoryChartFromData() {
+    var dataEl = document.getElementById('inventory-chart-data');
+    var jsonStr = dataEl ? (dataEl.value || dataEl.textContent || '').trim() : '';
+    if (!jsonStr) return;
+    var ctx = document.getElementById('inventoryChart');
+    if (!ctx || typeof Chart === 'undefined') return;
+    try {
+        var raw = JSON.parse(jsonStr);
+    } catch (e) { return; }
+    var labels = raw.labels;
+    var onHandData = raw.onHand;
+    var salesData = raw.sales;
+    var purchasesData = raw.purchases;
+    var unitCost = raw.unitCost;
+    var priceData = labels.map(function() { return unitCost; });
+    if (window.inventoryChart) try { window.inventoryChart.destroy(); } catch (e) {}
+    window.inventoryChart = new Chart(ctx.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                { label: 'On Hand', data: onHandData, borderColor: 'rgb(52, 152, 219)', backgroundColor: 'rgba(52, 152, 219, 0.1)', fill: true, tension: 0.4, yAxisID: 'y', hidden: false },
+                { label: 'Sales', data: salesData, borderColor: 'rgb(231, 76, 60)', backgroundColor: 'rgba(231, 76, 60, 0.1)', fill: true, tension: 0.4, yAxisID: 'y', hidden: false },
+                { label: 'Purchases', data: purchasesData, borderColor: 'rgb(46, 204, 113)', backgroundColor: 'rgba(46, 204, 113, 0.1)', fill: true, tension: 0.4, yAxisID: 'y', hidden: false },
+                { label: 'Price (unit cost)', data: priceData, borderColor: 'rgb(155, 89, 182)', borderDash: [5, 5], fill: false, tension: 0, yAxisID: 'y1', hidden: false }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: {
+                legend: { display: true, onClick: function(e) { e.stopPropagation(); }, labels: { color: '#000' } }
+            },
+            scales: {
+                y: { type: 'linear', position: 'left', beginAtZero: true, title: { display: true, text: 'Qty', color: '#000' }, ticks: { color: '#000' } },
+                y1: { type: 'linear', position: 'right', beginAtZero: true, title: { display: true, text: 'Price ($)', color: '#000' }, ticks: { color: '#000' }, grid: { drawOnChartArea: false } },
+                x: { ticks: { color: '#000' } }
+            }
+        }
+    });
+    function updateInventoryToggleButtons() {
+        if (!window.inventoryChart) return;
+        var m0 = window.inventoryChart.getDatasetMeta(0), m1 = window.inventoryChart.getDatasetMeta(1), m2 = window.inventoryChart.getDatasetMeta(2), m3 = window.inventoryChart.getDatasetMeta(3);
+        var el; el = document.getElementById('toggle-onhand'); if (el) el.textContent = m0.hidden ? 'Show On-Hand' : 'Hide On-Hand';
+        el = document.getElementById('toggle-sales'); if (el) el.textContent = m1.hidden ? 'Show Sales' : 'Hide Sales';
+        el = document.getElementById('toggle-purchases'); if (el) el.textContent = m2.hidden ? 'Show Purchases' : 'Hide Purchases';
+        el = document.getElementById('toggle-price'); if (el) el.textContent = m3.hidden ? 'Show Price' : 'Hide Price';
+    }
+    window.updateInventoryToggleButtons = updateInventoryToggleButtons;
+    updateInventoryToggleButtons();
+}
+
+function toggleInventoryChartCollapse() {
+    var el = document.getElementById('inventory-chart-content');
+    var icon = document.getElementById('inventory-chart-toggle-icon');
+    if (!el) return;
+    el.classList.toggle('collapsed');
+    if (icon) icon.textContent = el.classList.contains('collapsed') ? '\u25B6' : '\u25BC';
+}
+function toggleInventoryChartSeries(seriesName) {
+    if (!window.inventoryChart) return;
+    var index = -1;
+    switch (seriesName) { case 'onhand': index = 0; break; case 'sales': index = 1; break; case 'purchases': index = 2; break; case 'price': index = 3; break; }
+    if (index >= 0) {
+        var meta = window.inventoryChart.getDatasetMeta(index);
+        meta.hidden = !meta.hidden;
+        window.inventoryChart.update('none');
+        if (window.updateInventoryToggleButtons) window.updateInventoryToggleButtons();
+    }
+}
+function showAllInventorySeries() {
+    if (!window.inventoryChart) return;
+    window.inventoryChart.data.datasets.forEach(function(d, i) { var m = window.inventoryChart.getDatasetMeta(i); m.hidden = false; });
+    window.inventoryChart.update('none');
+    if (window.updateInventoryToggleButtons) window.updateInventoryToggleButtons();
 }

@@ -7,7 +7,7 @@ if (!isset($vendors)) $vendors = [];
 if (!isset($orders)) $orders = [];
 if (!isset($inventorySort)) $inventorySort = 'status';
 $dateArray = $dateArray ?? [];
-$otherDates = $dateArray; // V2: same as dateArray (all dates in range)
+$otherDates = isset($inventoryTableDates) && !empty($inventoryTableDates) ? $inventoryTableDates : $dateArray;
 $snapshotsMap = $snapshotsMap ?? [];
 $salesMap = $salesMap ?? [];
 $purchasesMap = $purchasesMap ?? [];
@@ -25,7 +25,7 @@ if ($dayBeforeFirst && isset($snapshotsMap)) {
         if (isset($byDate[$dayBeforeFirst])) $startingMap[$pid] = $byDate[$dayBeforeFirst];
     }
 }
-$invColspan = 17 + (2 * count($dateArray));
+$invColspan = 17 + (2 * count($otherDates));
 ?>
 
 <!-- Inventory List -->
@@ -42,9 +42,9 @@ $invColspan = 17 + (2 * count($dateArray));
             <div style="font-size: 11px; color: #000 !important; border-top: 1px solid #ddd; padding-top: 5px; margin-top: 5px;">
                 <strong>Vendor rating:</strong> When adding a vendor, choose 1–5 stars in the form. To change a rating, click the vendor name under “Edit vendor” above, then update the rating dropdown and save.
             </div>
-            <?php if (false): // Future: Lightspeed POS integration ?>
+            <?php if (false): // Deferred post-Launch-1: POS integration lives outside locked scope ?>
             <div style="font-size: 11px; margin-top: 5px;">
-                💡 <a href="#" onclick="alert('Lightspeed POS API integration coming soon!'); return false;">Connect Lightspeed POS</a> for automatic inventory sync
+                💡 <a href="#" onclick="alert('POS integration is deferred until after Launch 1 scope is complete.'); return false;">Connect Lightspeed POS</a> for automatic inventory sync
             </div>
             <?php endif; ?>
         </div>
@@ -108,17 +108,20 @@ $invColspan = 17 + (2 * count($dateArray));
                         $avgDailyUsage = $avg7Day !== null && $avg7Day > 0 ? $avg7Day : ($item['avg_daily_usage'] ?? 0);
 
                         // Auto-calculate ROP and Target using 7-day average if available (always recalc for accuracy)
+                        $avgDailyUsageVal = (float)($item['avg_daily_usage'] ?? 0);
                         if ($avg7Day !== null && $avg7Day > 0) {
                             $item['reorder_point'] = calculateReorderPointForDays($avg7Day, $leadTimeDays, $daysOfStock);
                             $item['target_max'] = calculateTargetMaxForDays($avg7Day, $daysOfStock);
-                        } elseif ($item['avg_daily_usage'] > 0) {
-                            if ($item['reorder_point'] == 0) {
-                                $item['reorder_point'] = calculateReorderPointForDays($item['avg_daily_usage'], $leadTimeDays, $daysOfStock);
+                        } elseif ($avgDailyUsageVal > 0) {
+                            if (empty($item['reorder_point'])) {
+                                $item['reorder_point'] = calculateReorderPointForDays($avgDailyUsageVal, $leadTimeDays, $daysOfStock);
                             }
-                            if ($item['target_max'] == 0) {
-                                $item['target_max'] = calculateTargetMaxForDays($item['avg_daily_usage'], $daysOfStock);
+                            if (empty($item['target_max'])) {
+                                $item['target_max'] = calculateTargetMaxForDays($avgDailyUsageVal, $daysOfStock);
                             }
                         }
+                        $item['reorder_point'] = $item['reorder_point'] ?? 0;
+                        $item['target_max'] = $item['target_max'] ?? 0;
 
                         // Calculate suggested order using entry-date on hand - exclude if pending order exists
                         if ($hasPendingOrder) {
@@ -132,8 +135,8 @@ $invColspan = 17 + (2 * count($dateArray));
                         $estTotal = $suggestedOrder * $item['unit_cost'];
                     ?>
                         <tr class="status-<?php echo strtolower($status); ?>" data-inventory-id="<?php echo $item['id']; ?>" data-product-id="<?php echo $item['product_id']; ?>" data-reorder-point="<?php echo htmlspecialchars($item['reorder_point'] ?? 0); ?>">
-                            <td>
-                                <a href="?action=dashboard&amp;store=<?php echo (int)($storeId ?? 0); ?>&amp;date=<?php echo htmlspecialchars($date ?? ''); ?>&amp;view=<?php echo htmlspecialchars($view ?? 'week'); ?>&amp;chart_product_id=<?php echo (int)$pid; ?>&amp;chart_days=<?php echo (int)$chartDays; ?>#inventory-chart" class="sku-chart-link" title="View this product in the chart below"><?php echo htmlspecialchars($item['sku']); ?></a>
+                            <td class="inventory-td-sku">
+                                <a href="?action=<?php echo htmlspecialchars($action ?? 'dashboard'); ?>&amp;store=<?php echo (int)($storeId ?? 0); ?>&amp;date=<?php echo htmlspecialchars($date ?? ''); ?>&amp;view=<?php echo htmlspecialchars($view ?? 'week'); ?>&amp;tab=inventory&amp;chart_product_id=<?php echo (int)$pid; ?>&amp;chart_days=<?php echo (int)$chartDays; ?>#inventory-chart" class="sku-chart-link" title="View this product in the chart below"><?php echo htmlspecialchars($item['sku']); ?></a>
                             </td>
                             <?php foreach ($otherDates as $d):
                                 $salesVal = isset($salesMap[$pid][$d]) ? $salesMap[$pid][$d] : '';
@@ -164,19 +167,19 @@ $invColspan = 17 + (2 * count($dateArray));
                             <td><?php echo $daysOfStock; ?> days</td>
                             <td>
                                 <?php if ($avgDailyUsage > 0 && $item['reorder_point'] > 0): ?>
-                                    <span title="Auto-calculated: (<?php echo $avgDailyUsage; ?> × <?php echo $leadTimeDays; ?> lead) + (<?php echo $avgDailyUsage; ?> × <?php echo $daysOfStock; ?> days)"><?php echo number_format($item['reorder_point'], 2); ?></span>
+                                    <span title="Auto-calculated: (<?php echo $avgDailyUsage; ?> × <?php echo $leadTimeDays; ?> lead) + (<?php echo $avgDailyUsage; ?> × <?php echo $daysOfStock; ?> days)"><?php echo number_format((float)($item['reorder_point'] ?? 0), 0); ?></span>
                                 <?php else: ?>
-                                    <?php echo htmlspecialchars($item['reorder_point']); ?>
+                                    <?php echo (int)round((float)($item['reorder_point'] ?? 0)); ?>
                                 <?php endif; ?>
                             </td>
                             <td>
                                 <?php if ($avgDailyUsage > 0 && $item['target_max'] > 0): ?>
                                     <span title="Auto-calculated: <?php echo $avgDailyUsage; ?> × <?php echo $daysOfStock; ?> days"><?php echo number_format($item['target_max'], 0); ?></span>
                                 <?php else: ?>
-                                    <?php echo htmlspecialchars($item['target_max']); ?>
+                                    <?php echo (int)round((float)($item['target_max'] ?? 0)); ?>
                                 <?php endif; ?>
                             </td>
-                            <td>
+                            <td class="btn-cell">
                                 <strong style="color: <?php echo $suggestedOrder > 0 ? '#e74c3c' : '#27ae60'; ?>;">
                                     <?php echo $suggestedOrder > 0 ? number_format($suggestedOrder, 0) : '-'; ?>
                                 </strong>
@@ -184,32 +187,33 @@ $invColspan = 17 + (2 * count($dateArray));
                                     <br><small style="color: #000;" title="Enough for <?php echo $daysOfStock; ?> days + lead time">(<?php echo round($suggestedOrder / $avgDailyUsage); ?> days)</small>
                                 <?php endif; ?>
                             </td>
-                            <td>
-                                <?php if ($pendingOrder): ?>
-                                    <span style="font-size: 11px; color: #f39c12;" title="Ordered on <?php echo htmlspecialchars($pendingOrder['order_date']); ?>">
-                                        <?php echo number_format($pendingOrder['quantity'], 0); ?>
+                            <td class="btn-cell">
+                                <?php if ($pendingOrder): 
+                                    $orderDateStr = !empty($pendingOrder['order_date']) ? date('M j', strtotime($pendingOrder['order_date'])) : '';
+                                ?>
+                                    <span style="font-size: 11px; color: #f39c12;" title="Ordered on <?php echo htmlspecialchars($pendingOrder['order_date'] ?? ''); ?>">
+                                        <?php echo number_format($pendingOrder['quantity'], 0); ?><?php echo $orderDateStr ? ' <small style="color: #000;">(' . $orderDateStr . ')</small>' : ''; ?>
                                     </span>
                                 <?php else: ?>
-                                    <span style="color: #999; font-size: 11px;">-</span>
+                                    <button type="button" class="btn-action btn-action-primary order-row-btn" title="Create order for this product (opens same form as + Add Order)"
+                                        data-product-id="<?php echo (int)$pid; ?>"
+                                        data-vendor-id="<?php echo (int)($item['vendor_id'] ?? 0); ?>"
+                                        data-unit-cost="<?php echo htmlspecialchars((string)($item['unit_cost'] ?? 0)); ?>"
+                                        data-suggested-qty="<?php echo (int)$suggestedOrder; ?>">Order</button>
                                 <?php endif; ?>
                             </td>
-                            <td>
+                            <td class="btn-cell">
                                 <?php if ($pendingOrder): ?>
                                     <?php 
                                     $expectedDate = $pendingOrder['expected_delivery_date'] ?? null;
                                     $orderId = $pendingOrder['id'] ?? null;
                                     ?>
-                                    <button type="button" 
-                                            class="btn-small btn-primary" 
-                                            onclick="markOrderReceived(<?php echo (int)$orderId; ?>, <?php echo (int)$item['product_id']; ?>, <?php echo (int)$item['store_id']; ?>, <?php echo json_encode($pendingOrder['quantity']); ?>)"
-                                            title="Mark order as received. Expected: <?php echo $expectedDate ? htmlspecialchars($expectedDate) : 'N/A'; ?>">
-                                        Received
-                                    </button>
+                                    <button type="button" class="btn-action btn-action-primary" onclick="openReceiveOrderModal(<?php echo (int)$orderId; ?>, <?php echo (int)$item['product_id']; ?>, <?php echo (int)$item['store_id']; ?>, <?php echo (int)round((float)$pendingOrder['quantity']); ?>)" title="Mark received (qty &amp; date). Exp: <?php echo $expectedDate ? htmlspecialchars($expectedDate) : 'N/A'; ?>">Rcvd</button>
                                     <?php if ($expectedDate): ?>
-                                        <br><small style="color: #000 !important; font-size: 10px;">Exp: <?php echo date('M j', strtotime($expectedDate)); ?></small>
+                                        <small style="color: #000; font-size: 10px;">Exp: <?php echo date('M j', strtotime($expectedDate)); ?></small>
                                     <?php endif; ?>
                                 <?php else: ?>
-                                    <span style="color: #999; font-size: 11px;">-</span>
+                                    <span style="color: #999; font-size: 11px;">—</span>
                                 <?php endif; ?>
                             </td>
                             <td><?php echo htmlspecialchars($item['vendor_name'] ?? '-'); ?></td>
@@ -231,17 +235,16 @@ $invColspan = 17 + (2 * count($dateArray));
                                     <span style="color: #999;" title="No substitution set. Edit this inventory item to set a substitution product for when this item is unavailable.">-</span>
                                 <?php endif; ?>
                             </td>
-                            <td>
-                                <button type="button" class="btn-small" onclick="editInventory(<?php echo $item['id']; ?>)">Edit</button>
+                            <td class="btn-cell">
+                                <button type="button" class="btn-action" onclick="editInventory(<?php echo (int)$item['id']; ?>)" title="Edit this inventory item">Edit</button>
                                 <?php if ($hasPendingOrder): ?>
-                                    <span class="order-hint" title="Order pending - cannot place new order until received" style="color: #f39c12;">Ordered</span>
-                                <?php elseif ($suggestedOrder > 0 && !empty($item['vendor_id'])): ?>
-                                    <button type="button" class="btn-small btn-primary" onclick="createOrder(<?php echo (int)($item['product_id'] ?? 0); ?>, <?php echo (int)$item['vendor_id']; ?>, <?php echo json_encode($item['unit_cost'] ?? 0); ?>, <?php echo json_encode($suggestedOrder); ?>)">Order</button>
-                                <?php elseif ($suggestedOrder > 0): ?>
-                                    <span class="order-hint" title="Set vendor in Edit Inventory to enable Order">Order (set vendor)</span>
+                                    <span class="order-hint" title="Order pending" style="color: #f39c12; font-size: 11px;">Ordered</span>
                                 <?php endif; ?>
                             </td>
-                            <td><?php echo htmlspecialchars($item['notes'] ?? ''); ?></td>
+                            <td class="notes-cell">
+                                <span class="notes-cell-text"><?php echo htmlspecialchars($item['notes'] ?? ''); ?></span>
+                                <span class="notes-cell-hover"><?php echo htmlspecialchars($item['notes'] ?? ''); ?></span>
+                            </td>
                         </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>

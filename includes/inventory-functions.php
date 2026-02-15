@@ -41,6 +41,40 @@ function saveProduct($data) {
     }
 }
 
+/**
+ * Update a product's SKU if the new value is valid and unique.
+ * Returns ['success' => true] on success, ['success' => false, 'error' => 'duplicate'|'invalid'] on failure.
+ */
+function updateProductSku($productId, $newSku) {
+    $newSku = $newSku !== null ? trim((string)$newSku) : '';
+    if ($newSku === '') {
+        return ['success' => false, 'error' => 'invalid'];
+    }
+    try {
+        $pdo = getDB();
+        $stmt = $pdo->prepare("SELECT sku FROM products WHERE id = ?");
+        $stmt->execute([$productId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return ['success' => false, 'error' => 'invalid'];
+        }
+        if (strcasecmp($row['sku'], $newSku) === 0) {
+            return ['success' => true];
+        }
+        $check = $pdo->prepare("SELECT id FROM products WHERE sku = ? AND id != ?");
+        $check->execute([$newSku, $productId]);
+        if ($check->fetch()) {
+            return ['success' => false, 'error' => 'duplicate'];
+        }
+        $up = $pdo->prepare("UPDATE products SET sku = ? WHERE id = ?");
+        $up->execute([$newSku, $productId]);
+        return ['success' => true];
+    } catch (PDOException $e) {
+        error_log("Error updating product SKU: " . $e->getMessage());
+        return ['success' => false, 'error' => 'invalid'];
+    }
+}
+
 function deleteProduct($id) {
     try {
         $pdo = getDB();
@@ -720,11 +754,11 @@ function get7DayAverageSales($storeId, $productId, $asOfDate = null) {
         $stmt->execute([$storeId, $productId, $startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
         $result = $stmt->fetch(PDO::FETCH_ASSOC);
         
-        // Require minimum 7 days of data
-        if ($result && (int)$result['days_count'] >= 7) {
+        // Use average when we have at least 1 day of data (so reorder list can calculate with partial data)
+        if ($result && (int)$result['days_count'] >= 1) {
             return (float)$result['avg_sales'];
         }
-        return null; // Not enough data
+        return null; // No data
     } catch (PDOException $e) {
         error_log("Error calculating 7-day average: " . $e->getMessage());
         return null;
