@@ -562,6 +562,18 @@ if (isset($_POST['timeclock_geofence_settings_save'])) {
     $alertOpenFailureThreshold = max(1, min(100, (int)($_POST['kiosk_alert_open_failure_threshold'] ?? 3)));
     $alertStaleMinutes = max(5, min(1440, (int)($_POST['kiosk_alert_stale_minutes'] ?? 60)));
     $noShowGraceMinutes = max(0, min(180, (int)($_POST['no_show_grace_minutes'] ?? 15)));
+    $remindersEnabled = isset($_POST['reminders_enabled']) ? '1' : '0';
+    $reminderNoShowEnabled = isset($_POST['reminder_no_show_enabled']) ? '1' : '0';
+    $reminderQuietStart = trim((string)($_POST['reminder_quiet_start'] ?? '22:00'));
+    $reminderQuietEnd = trim((string)($_POST['reminder_quiet_end'] ?? '06:00'));
+    if (!preg_match('/^\d{2}:\d{2}$/', $reminderQuietStart)) {
+        $reminderQuietStart = '22:00';
+    }
+    if (!preg_match('/^\d{2}:\d{2}$/', $reminderQuietEnd)) {
+        $reminderQuietEnd = '06:00';
+    }
+    $reminderLeadRaw = trim((string)($_POST['reminder_lead_minutes_csv'] ?? '60,720'));
+    $reminderLeadMinutes = implode(',', parseReminderLeadMinutesCsv($reminderLeadRaw, '60,720'));
     $opsOpen = is_array($_POST['ops_open'] ?? null) ? $_POST['ops_open'] : [];
     $opsClose = is_array($_POST['ops_close'] ?? null) ? $_POST['ops_close'] : [];
     $opsEnabled = is_array($_POST['ops_enabled'] ?? null) ? $_POST['ops_enabled'] : [];
@@ -588,6 +600,11 @@ if (isset($_POST['timeclock_geofence_settings_save'])) {
         'kiosk_alert_open_failure_threshold' => (string)$alertOpenFailureThreshold,
         'kiosk_alert_stale_minutes' => (string)$alertStaleMinutes,
         'no_show_grace_minutes' => (string)$noShowGraceMinutes,
+        'reminders_enabled' => (string)$remindersEnabled,
+        'reminder_no_show_enabled' => (string)$reminderNoShowEnabled,
+        'reminder_lead_minutes_csv' => (string)$reminderLeadMinutes,
+        'reminder_quiet_start' => (string)$reminderQuietStart,
+        'reminder_quiet_end' => (string)$reminderQuietEnd,
         'store_operating_hours_json' => json_encode($operatingHours),
     ];
     $allOk = true;

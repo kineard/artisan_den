@@ -269,6 +269,11 @@ VALUES
     ('global', NULL, 'kiosk_alert_open_failure_threshold', '3'),
     ('global', NULL, 'kiosk_alert_stale_minutes', '60'),
     ('global', NULL, 'no_show_grace_minutes', '15'),
+    ('global', NULL, 'reminders_enabled', '1'),
+    ('global', NULL, 'reminder_no_show_enabled', '1'),
+    ('global', NULL, 'reminder_lead_minutes_csv', '60,720'),
+    ('global', NULL, 'reminder_quiet_start', '22:00'),
+    ('global', NULL, 'reminder_quiet_end', '06:00'),
     ('global', NULL, 'store_operating_hours_json', '{"mon":{"enabled":true,"open":"09:00","close":"21:00"},"tue":{"enabled":true,"open":"09:00","close":"21:00"},"wed":{"enabled":true,"open":"09:00","close":"21:00"},"thu":{"enabled":true,"open":"09:00","close":"21:00"},"fri":{"enabled":true,"open":"09:00","close":"21:00"},"sat":{"enabled":true,"open":"09:00","close":"21:00"},"sun":{"enabled":true,"open":"09:00","close":"21:00"}}'),
     ('global', NULL, 'require_network_to_punch', '1')
 ON CONFLICT (scope, store_id, setting_key) DO NOTHING;

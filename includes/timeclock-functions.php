@@ -513,6 +513,14 @@ function clockOutEmployee($employeeId, $storeId, $meta = []) {
 function getGeofenceSettingsForStore($storeId) {
     $policyRaw = (string)getTimeclockSettingValue('geofence_policy', (int)$storeId, 'warn');
     $policy = in_array($policyRaw, ['warn', 'block'], true) ? $policyRaw : 'warn';
+    $quietStart = (string)getTimeclockSettingValue('reminder_quiet_start', (int)$storeId, '22:00');
+    if (!preg_match('/^\d{2}:\d{2}$/', $quietStart)) {
+        $quietStart = '22:00';
+    }
+    $quietEnd = (string)getTimeclockSettingValue('reminder_quiet_end', (int)$storeId, '06:00');
+    if (!preg_match('/^\d{2}:\d{2}$/', $quietEnd)) {
+        $quietEnd = '06:00';
+    }
     return [
         'enabled' => getTimeclockSettingValue('geofence_enabled', (int)$storeId, '0') === '1',
         'lat' => (float)getTimeclockSettingValue('geofence_lat', (int)$storeId, '0'),
@@ -524,7 +532,81 @@ function getGeofenceSettingsForStore($storeId) {
         'alert_open_failure_threshold' => max(1, min(100, (int)getTimeclockSettingValue('kiosk_alert_open_failure_threshold', (int)$storeId, '3'))),
         'alert_stale_minutes' => max(5, min(1440, (int)getTimeclockSettingValue('kiosk_alert_stale_minutes', (int)$storeId, '60'))),
         'no_show_grace_minutes' => max(0, min(180, (int)getTimeclockSettingValue('no_show_grace_minutes', (int)$storeId, '15'))),
+        'reminders_enabled' => getTimeclockSettingValue('reminders_enabled', (int)$storeId, '1') === '1',
+        'reminder_no_show_enabled' => getTimeclockSettingValue('reminder_no_show_enabled', (int)$storeId, '1') === '1',
+        'reminder_lead_minutes_csv' => (string)getTimeclockSettingValue('reminder_lead_minutes_csv', (int)$storeId, '60,720'),
+        'reminder_quiet_start' => $quietStart,
+        'reminder_quiet_end' => $quietEnd,
     ];
+}
+
+function parseReminderLeadMinutesCsv($csv, $fallback = '60,720') {
+    $raw = trim((string)$csv);
+    if ($raw === '') {
+        $raw = trim((string)$fallback);
+    }
+    $parts = preg_split('/\s*,\s*/', $raw);
+    if (!is_array($parts)) {
+        $parts = [];
+    }
+    $out = [];
+    foreach ($parts as $part) {
+        if ($part === '' || !preg_match('/^\d{1,5}$/', (string)$part)) {
+            continue;
+        }
+        $m = (int)$part;
+        if ($m < 5 || $m > 10080) {
+            continue;
+        }
+        $out[] = $m;
+    }
+    if (empty($out)) {
+        $out = [60, 720];
+    }
+    $out = array_values(array_unique($out));
+    sort($out, SORT_NUMERIC);
+    return $out;
+}
+
+function isTimeclockQuietHoursActive($quietStart, $quietEnd, $referenceDateTime = null) {
+    $start = (string)$quietStart;
+    $end = (string)$quietEnd;
+    if (!preg_match('/^\d{2}:\d{2}$/', $start) || !preg_match('/^\d{2}:\d{2}$/', $end)) {
+        return false;
+    }
+    try {
+        $tz = new DateTimeZone(TIMEZONE);
+        $now = $referenceDateTime instanceof DateTime ? clone $referenceDateTime : new DateTime('now', $tz);
+        $now->setTimezone($tz);
+        $minutesNow = ((int)$now->format('H') * 60) + (int)$now->format('i');
+        [$sh, $sm] = array_map('intval', explode(':', $start));
+        [$eh, $em] = array_map('intval', explode(':', $end));
+        $startMinutes = ($sh * 60) + $sm;
+        $endMinutes = ($eh * 60) + $em;
+        if ($startMinutes === $endMinutes) {
+            return false;
+        }
+        if ($startMinutes < $endMinutes) {
+            return $minutesNow >= $startMinutes && $minutesNow < $endMinutes;
+        }
+        // Overnight quiet hours, e.g. 22:00 -> 06:00
+        return $minutesNow >= $startMinutes || $minutesNow < $endMinutes;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function formatMinutesFromNowLabel($minutesFromNow) {
+    $mins = max(0, (int)$minutesFromNow);
+    $h = (int)floor($mins / 60);
+    $m = $mins % 60;
+    if ($h > 0 && $m > 0) {
+        return $h . 'h ' . $m . 'm';
+    }
+    if ($h > 0) {
+        return $h . 'h';
+    }
+    return $m . 'm';
 }
 
 function getDefaultStoreOperatingHoursMap() {
@@ -1300,6 +1382,104 @@ function getMissedClockInAlertsForStoreDate($storeId, $dateYmd, $graceMinutes = 
         return $alerts;
     } catch (Throwable $e) {
         error_log('getMissedClockInAlertsForStoreDate error: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function getTimeclockReminderAlertsForStoreDate($storeId, $dateYmd, $settings = [], $limit = 120) {
+    try {
+        $safeLimit = max(1, min(500, (int)$limit));
+        $remindersEnabled = !empty($settings['reminders_enabled']);
+        if (!$remindersEnabled) {
+            return [];
+        }
+        $quietStart = (string)($settings['reminder_quiet_start'] ?? '22:00');
+        $quietEnd = (string)($settings['reminder_quiet_end'] ?? '06:00');
+        $quietActive = isTimeclockQuietHoursActive($quietStart, $quietEnd);
+        $leadMinutes = parseReminderLeadMinutesCsv((string)($settings['reminder_lead_minutes_csv'] ?? '60,720'));
+        $maxLeadMinutes = max($leadMinutes);
+        $results = [];
+        $nowLocal = new DateTime('now', new DateTimeZone(TIMEZONE));
+
+        if (!$quietActive) {
+            $rangeStart = new DateTime((string)$dateYmd, new DateTimeZone(TIMEZONE));
+            $rangeEnd = clone $nowLocal;
+            $rangeEnd->modify('+' . ($maxLeadMinutes + 180) . ' minutes');
+            $shifts = getScheduleShiftsForStoreRange(
+                (int)$storeId,
+                $rangeStart->format('Y-m-d'),
+                $rangeEnd->format('Y-m-d')
+            );
+            foreach ($shifts as $shift) {
+                if (count($results) >= $safeLimit) {
+                    break;
+                }
+                $empId = (int)($shift['employee_id'] ?? 0);
+                $startUtc = (string)($shift['start_utc'] ?? '');
+                $endUtc = (string)($shift['end_utc'] ?? '');
+                if ($empId <= 0 || $startUtc === '' || $endUtc === '') {
+                    continue;
+                }
+                try {
+                    $startLocal = new DateTime($startUtc, new DateTimeZone('UTC'));
+                    $startLocal->setTimezone(new DateTimeZone(TIMEZONE));
+                } catch (Throwable $inner) {
+                    continue;
+                }
+                $minsUntil = (int)floor(($startLocal->getTimestamp() - $nowLocal->getTimestamp()) / 60);
+                if ($minsUntil < 0 || $minsUntil > $maxLeadMinutes) {
+                    continue;
+                }
+                $matchedWindow = null;
+                foreach ($leadMinutes as $window) {
+                    if (abs($minsUntil - $window) <= 5) {
+                        $matchedWindow = $window;
+                        break;
+                    }
+                }
+                if ($matchedWindow === null) {
+                    continue;
+                }
+                if (hasApprovedPtoOverlapForEmployee($empId, $startLocal->format('Y-m-d'), $startLocal->format('Y-m-d'))) {
+                    continue;
+                }
+                if (hasWorkedShiftOverlap($empId, (int)$storeId, $startUtc, $endUtc)) {
+                    continue;
+                }
+                $results[] = [
+                    'type' => 'UPCOMING_SHIFT',
+                    'severity' => 'info',
+                    'employee_id' => $empId,
+                    'full_name' => (string)($shift['full_name'] ?? ('Employee #' . $empId)),
+                    'role_name' => (string)($shift['role_name'] ?? 'Employee'),
+                    'message' => 'Shift starts in ' . formatMinutesFromNowLabel($minsUntil) . ' (' . $startLocal->format('g:i A') . ').',
+                    'trigger_window_minutes' => $matchedWindow
+                ];
+            }
+        }
+
+        if (!empty($settings['reminder_no_show_enabled']) && !$quietActive && count($results) < $safeLimit) {
+            $noShowGrace = max(0, min(180, (int)($settings['no_show_grace_minutes'] ?? 15)));
+            $missed = getMissedClockInAlertsForStoreDate((int)$storeId, (string)$dateYmd, $noShowGrace, max(1, $safeLimit - count($results)));
+            foreach ($missed as $row) {
+                if (count($results) >= $safeLimit) {
+                    break;
+                }
+                $results[] = [
+                    'type' => 'MISSED_CLOCK_IN',
+                    'severity' => 'critical',
+                    'employee_id' => (int)($row['employee_id'] ?? 0),
+                    'full_name' => (string)($row['full_name'] ?? 'Employee'),
+                    'role_name' => (string)($row['role_name'] ?? 'Employee'),
+                    'message' => 'No clock-in detected. Scheduled ' . (string)($row['scheduled_start_local'] ?? '-') . ' • Late by ' . (int)($row['minutes_late'] ?? 0) . 'm.',
+                    'trigger_window_minutes' => null
+                ];
+            }
+        }
+
+        return $results;
+    } catch (Throwable $e) {
+        error_log('getTimeclockReminderAlertsForStoreDate error: ' . $e->getMessage());
         return [];
     }
 }

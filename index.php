@@ -196,6 +196,8 @@ $timeClockSlaOpenFailureThreshold = 3;
 $timeClockSlaStaleMinutes = 60;
 $timeClockNoShowGraceMinutes = 15;
 $timeClockNoShowAlerts = [];
+$timeClockReminderAlerts = [];
+$timeClockReminderQuietHoursActive = false;
 $timeClockOperatingHoursMap = [];
 $timeClockOperatingHoursByDate = [];
 $timeClockSelectedDateHours = ['enabled' => true, 'open' => '09:00', 'close' => '21:00'];
@@ -370,6 +372,11 @@ if ($storeId && $action === 'timeclock') {
     $timeClockSlaStaleMinutes = (int)($timeClockGeoSettings['alert_stale_minutes'] ?? 60);
     $timeClockNoShowGraceMinutes = (int)($timeClockGeoSettings['no_show_grace_minutes'] ?? 15);
     $timeClockNoShowAlerts = getMissedClockInAlertsForStoreDate((int)$storeId, (string)$date, $timeClockNoShowGraceMinutes, 120);
+    $timeClockReminderQuietHoursActive = isTimeclockQuietHoursActive(
+        (string)($timeClockGeoSettings['reminder_quiet_start'] ?? '22:00'),
+        (string)($timeClockGeoSettings['reminder_quiet_end'] ?? '06:00')
+    );
+    $timeClockReminderAlerts = getTimeclockReminderAlertsForStoreDate((int)$storeId, (string)$date, $timeClockGeoSettings, 120);
     $nowTs = time();
     foreach ($timeClockKioskDeviceSummary as $row) {
         $openFailed = (int)($row['unresolved_failed_attempts'] ?? 0);
@@ -384,7 +391,7 @@ if ($storeId && $action === 'timeclock') {
             ];
         }
     }
-    $timeClockNeedsAttention = !empty($timeClockSlaAlertRows) || !empty($timeClockNoShowAlerts);
+    $timeClockNeedsAttention = !empty($timeClockSlaAlertRows) || !empty($timeClockNoShowAlerts) || !empty($timeClockReminderAlerts);
     $timeClockPtoBalances = getPtoBalancesByStore($storeId);
     $timeClockPendingPtoRequests = getPendingPtoRequestsByStore($storeId);
     $timeClockRecentPtoRequests = getRecentPtoRequestsByStore($storeId, 30);
@@ -1127,6 +1134,9 @@ include 'includes/header.php';
             <span class="<?php echo !empty($timeClockNoShowAlerts) ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">
                 Missed clock-ins: <?php echo (int)count($timeClockNoShowAlerts); ?>
             </span>
+            <span class="<?php echo !empty($timeClockReminderAlerts) ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">
+                Reminders: <?php echo (int)count($timeClockReminderAlerts); ?>
+            </span>
         </div>
         <div class="timeclock-quick-actions">
             <button type="button" class="timeclock-quick-btn" data-target="tc_panel_payroll">Run Payroll</button>
@@ -1171,6 +1181,10 @@ include 'includes/header.php';
             <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_live" data-icon="📍">
                 <span class="timeclock-launcher-title">Live Floor View</span>
                 <span class="timeclock-launcher-subtitle">Who is clocked in and recent punches</span>
+            </button>
+            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_reminders" data-icon="🔔">
+                <span class="timeclock-launcher-title">Reminders & Alarms</span>
+                <span class="timeclock-launcher-subtitle">Upcoming shifts and no-show alerts</span>
             </button>
             <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_admin" data-icon="🛡">
                 <span class="timeclock-launcher-title">Approvals & Audit</span>
@@ -1726,6 +1740,24 @@ include 'includes/header.php';
                 <input type="number" id="tc_no_show_grace_minutes" name="no_show_grace_minutes" min="0" max="180" value="<?php echo (int)($timeClockGeoSettings['no_show_grace_minutes'] ?? 15); ?>">
             </div>
             <div class="form-group">
+                <label><input type="checkbox" name="reminders_enabled" value="1" <?php echo !empty($timeClockGeoSettings['reminders_enabled']) ? 'checked' : ''; ?>> Enable reminders and alarms</label>
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" name="reminder_no_show_enabled" value="1" <?php echo !empty($timeClockGeoSettings['reminder_no_show_enabled']) ? 'checked' : ''; ?>> Include missed clock-in alarms in reminders</label>
+            </div>
+            <div class="form-group">
+                <label for="tc_reminder_leads">Upcoming shift reminder windows (minutes, comma-separated)</label>
+                <input type="text" id="tc_reminder_leads" name="reminder_lead_minutes_csv" value="<?php echo htmlspecialchars((string)($timeClockGeoSettings['reminder_lead_minutes_csv'] ?? '60,720')); ?>" placeholder="e.g. 60,720">
+            </div>
+            <div class="form-group">
+                <label for="tc_reminder_quiet_start">Quiet hours start</label>
+                <input type="time" id="tc_reminder_quiet_start" name="reminder_quiet_start" value="<?php echo htmlspecialchars((string)($timeClockGeoSettings['reminder_quiet_start'] ?? '22:00')); ?>">
+            </div>
+            <div class="form-group">
+                <label for="tc_reminder_quiet_end">Quiet hours end</label>
+                <input type="time" id="tc_reminder_quiet_end" name="reminder_quiet_end" value="<?php echo htmlspecialchars((string)($timeClockGeoSettings['reminder_quiet_end'] ?? '06:00')); ?>">
+            </div>
+            <div class="form-group">
                 <label for="tc_geofence_mgr">Manager</label>
                 <input type="text" id="tc_geofence_mgr" name="manager_name" required value="<?php echo htmlspecialchars($currentUserName); ?>" readonly>
             </div>
@@ -2155,6 +2187,55 @@ include 'includes/header.php';
             <?php endif; ?>
         </div>
     </div>
+    </div>
+
+    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_reminders">
+        <h2>Reminders & Alarms</h2>
+        <p class="timeclock-mobile-help">In-app reminders for upcoming shifts and missed clock-ins based on store settings.</p>
+        <div class="timeclock-hub-stats">
+            <span class="<?php echo !empty($timeClockGeoSettings['reminders_enabled']) ? 'timeclock-badge-ok' : 'timeclock-badge-warning'; ?>">
+                Reminders: <?php echo !empty($timeClockGeoSettings['reminders_enabled']) ? 'ON' : 'OFF'; ?>
+            </span>
+            <span class="<?php echo $timeClockReminderQuietHoursActive ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">
+                Quiet hours: <?php echo htmlspecialchars((string)($timeClockGeoSettings['reminder_quiet_start'] ?? '22:00')); ?> - <?php echo htmlspecialchars((string)($timeClockGeoSettings['reminder_quiet_end'] ?? '06:00')); ?>
+                (<?php echo $timeClockReminderQuietHoursActive ? 'active now' : 'inactive'; ?>)
+            </span>
+            <span class="timeclock-badge-warning">
+                Lead windows (min): <?php echo htmlspecialchars((string)($timeClockGeoSettings['reminder_lead_minutes_csv'] ?? '60,720')); ?>
+            </span>
+        </div>
+        <?php if ($timeClockReminderQuietHoursActive): ?>
+            <div class="timeclock-lock-notice" style="margin-top:10px;">
+                Quiet hours are active now. Upcoming and no-show reminder notifications are currently suppressed.
+            </div>
+        <?php endif; ?>
+        <?php if (empty($timeClockReminderAlerts)): ?>
+            <p class="timeclock-muted" style="margin-top:10px;">No active reminders for this date/time.</p>
+        <?php else: ?>
+            <div class="history-table" style="margin-top:10px;">
+                <table>
+                    <thead>
+                    <tr><th>Type</th><th>Employee</th><th>Role</th><th>Message</th></tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($timeClockReminderAlerts as $rem): ?>
+                        <tr class="<?php echo (($rem['severity'] ?? '') === 'critical') ? 'timeclock-row-danger' : ''; ?>">
+                            <td>
+                                <?php if (($rem['type'] ?? '') === 'MISSED_CLOCK_IN'): ?>
+                                    <span class="timeclock-badge-danger">Missed Clock-In</span>
+                                <?php else: ?>
+                                    <span class="timeclock-badge-warning">Upcoming Shift</span>
+                                <?php endif; ?>
+                            </td>
+                            <td><?php echo htmlspecialchars((string)($rem['full_name'] ?? '-')); ?></td>
+                            <td><?php echo htmlspecialchars((string)($rem['role_name'] ?? '-')); ?></td>
+                            <td><?php echo htmlspecialchars((string)($rem['message'] ?? '')); ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        <?php endif; ?>
     </div>
 
     <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_admin">
