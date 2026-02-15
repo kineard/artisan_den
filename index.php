@@ -83,7 +83,16 @@ header('Content-Type: text/html; charset=UTF-8');
 $scriptVersion = (int)@filemtime(__DIR__ . '/js/main.js');
 $chartVersion = (int)@filemtime(__DIR__ . '/js/chart.umd.min.js');
 $action = $_GET['action'] ?? 'dashboard';
-$isKioskMode = ($action === 'timeclock' && (string)($_GET['kiosk'] ?? $_POST['kiosk'] ?? '') === '1');
+$timeclockRoleSurfaceByAction = [
+    'employee_dashboard' => 'employee',
+    'manager_dashboard' => 'manager',
+    'admin_dashboard' => 'admin',
+];
+$isTimeclockAction = ($action === 'timeclock' || isset($timeclockRoleSurfaceByAction[$action]));
+$timeclockRoleSurface = isset($timeclockRoleSurfaceByAction[$action])
+    ? $timeclockRoleSurfaceByAction[$action]
+    : '';
+$isKioskMode = ($isTimeclockAction && (string)($_GET['kiosk'] ?? $_POST['kiosk'] ?? '') === '1');
 if ($action === 'entry') {
     $qs = $_GET;
     $qs['action'] = 'dashboard';
@@ -138,7 +147,7 @@ $isKpiEditMode = ($kpiMode === 'edit');
 $isKpiAction = ($action === 'dashboard');
 require_once 'includes/post-handlers.php';
 
-if ($action === 'timeclock' && $storeId && !empty($_GET['payroll_export_period_id'])) {
+if ($isTimeclockAction && $storeId && !empty($_GET['payroll_export_period_id'])) {
     if (!currentUserCan('timeclock_manager')) {
         header('Content-Type: text/plain; charset=UTF-8', true, 403);
         echo 'Manager role required for payroll export.';
@@ -224,7 +233,24 @@ $timeClockRecentPtoRequests = [];
 $timeClockSelectedDateLocked = false;
 $timeClockPendingEditRequestLockMap = [];
 $timeClockPendingPtoRequestLockMap = [];
-if ($storeId && $action === 'timeclock') {
+$timeClockDefaultPanel = '';
+if ($storeId && $isTimeclockAction) {
+    if ($timeclockRoleSurface === '') {
+        if ($currentUserRole === 'employee') {
+            $timeclockRoleSurface = 'employee';
+        } elseif ($canAdminTimeclock) {
+            $timeclockRoleSurface = 'admin';
+        } else {
+            $timeclockRoleSurface = 'manager';
+        }
+    }
+    if ($timeclockRoleSurface === 'employee') {
+        $timeClockDefaultPanel = 'tc_panel_punch';
+    } elseif ($timeclockRoleSurface === 'admin') {
+        $timeClockDefaultPanel = 'tc_panel_settings';
+    } else {
+        $timeClockDefaultPanel = 'tc_panel_schedule';
+    }
     $timeClockEmployees = getTimeClockEmployeesForStore($storeId);
     $timeClockOpenShifts = getOpenShiftsByStore($storeId);
     $timeClockRecentEvents = getRecentShiftEventsByStore($storeId, 25);
@@ -616,6 +642,11 @@ include 'includes/header.php';
             <p>Run: <code>make seed</code> or set up the database using <code>setup-db.sh</code></p>
         </div>
     <?php else: ?>
+    <?php
+        $isEmployeeSurface = ($timeclockRoleSurface === 'employee');
+        $isManagerSurface = ($timeclockRoleSurface === 'manager');
+        $isAdminSurface = ($timeclockRoleSurface === 'admin');
+    ?>
     <div class="header app-hero">
         <div>
             <h1><?php echo APP_NAME; ?></h1>
@@ -971,7 +1002,7 @@ include 'includes/header.php';
     <?php endif; ?>
     
     <?php endif; // end storeId/empty stores check (closes line 115) ?>
-<?php elseif ($action === 'timeclock'): ?>
+<?php elseif ($isTimeclockAction): ?>
     <textarea id="tc_staff_schedule_data" hidden><?php echo htmlspecialchars(json_encode($timeClockStaffScheduleRows)); ?></textarea>
     <textarea id="tc_staff_pto_data" hidden><?php echo htmlspecialchars(json_encode($timeClockCalendarPtoRows)); ?></textarea>
     <textarea id="tc_staff_worked_data" hidden><?php echo htmlspecialchars(json_encode($timeClockCalendarWorkedRows)); ?></textarea>
@@ -1117,6 +1148,53 @@ include 'includes/header.php';
         </div>
     </div>
 
+    <?php if ($isEmployeeSurface): ?>
+    <?php if (!$isEmployeeSurface): ?>
+    <div class="timeclock-launcher-card">
+        <h2>Employee Dashboard</h2>
+        <p class="timeclock-mobile-help">Minimal-click self-service: punch, schedule, tasks, and requests.</p>
+        <div class="timeclock-quick-actions">
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_punch">Punch In/Out</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_staff_schedule">My Schedule</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_tasks">My Tasks</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_requests">Request Punch Edit</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_pto">Request PTO</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_reminders">My Alerts</button>
+        </div>
+    </div>
+    <?php elseif ($isManagerSurface): ?>
+    <div class="timeclock-launcher-card">
+        <h2>Manager Operations Dashboard</h2>
+        <p class="timeclock-mobile-help">Daily operations, scheduling, approvals, and exceptions in focused groups.</p>
+        <div class="timeclock-hub-stats">
+            <span class="timeclock-badge-ok">Open shifts: <?php echo (int)count($timeClockOpenShifts); ?></span>
+            <span class="timeclock-badge-warning">Pending punch edits: <?php echo (int)count($timeClockPendingEditRequests); ?></span>
+            <span class="timeclock-badge-warning">Pending PTO: <?php echo (int)count($timeClockPendingPtoRequests); ?></span>
+            <span class="<?php echo !empty($timeClockNoShowAlerts) ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">
+                Missed clock-ins: <?php echo (int)count($timeClockNoShowAlerts); ?>
+            </span>
+        </div>
+        <div class="timeclock-quick-actions">
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_schedule">Schedule Editor</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_tasks">Team Tasks</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_admin">Approvals</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_live">Live Floor</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_reminders">Alerts</button>
+        </div>
+    </div>
+    <?php elseif ($isAdminSurface): ?>
+    <div class="timeclock-launcher-card">
+        <h2>Admin Time Clock Settings</h2>
+        <p class="timeclock-mobile-help">Payroll controls, policy setup, export controls, and location/kiosk governance.</p>
+        <div class="timeclock-quick-actions">
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_payroll">Payroll Controls</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_settings">Location/Kiosk Policies</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_pto">PTO Policy</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_admin">Audit & Approvals</button>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <div class="timeclock-launcher-card">
         <h2>Time Clock Functions</h2>
         <p class="timeclock-mobile-help">Open a function in a focused popup window.</p>
@@ -1139,9 +1217,15 @@ include 'includes/header.php';
             </span>
         </div>
         <div class="timeclock-quick-actions">
+            <?php if ($isAdminSurface): ?>
             <button type="button" class="timeclock-quick-btn" data-target="tc_panel_payroll">Run Payroll</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_settings">Location Settings</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_admin">Review Audit</button>
+            <?php else: ?>
             <button type="button" class="timeclock-quick-btn" data-target="tc_panel_schedule">Add Schedule</button>
+            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_tasks">Team Tasks</button>
             <button type="button" class="timeclock-quick-btn" data-target="tc_panel_admin">Review Approvals</button>
+            <?php endif; ?>
         </div>
         <div class="timeclock-launcher-grid">
             <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_punch" data-icon="⏱">
@@ -1160,12 +1244,13 @@ include 'includes/header.php';
                 <span class="timeclock-launcher-title">Task List</span>
                 <span class="timeclock-launcher-subtitle">Assign by day/shift, checkoff, and missed visibility</span>
             </button>
-            <?php if ($canManageTimeclock): ?>
+            <?php if ($isAdminSurface && $canManageTimeclock): ?>
             <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_settings" data-icon="📡">
                 <span class="timeclock-launcher-title">Location & Kiosk Settings</span>
                 <span class="timeclock-launcher-subtitle">Geofence policy, radius, GPS behavior, kiosk timeout</span>
             </button>
             <?php endif; ?>
+            <?php if ($isAdminSurface): ?>
             <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_pto" data-icon="🏖">
                 <span class="timeclock-launcher-title">PTO / Leave Setup</span>
                 <span class="timeclock-launcher-subtitle">Policies, balances, and employee requests</span>
@@ -1174,17 +1259,10 @@ include 'includes/header.php';
                 <span class="timeclock-launcher-title">Payroll</span>
                 <span class="timeclock-launcher-subtitle">Periods, lock/unlock, run summary, export</span>
             </button>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_requests" data-icon="📝">
-                <span class="timeclock-launcher-title">Punch Edit Requests</span>
-                <span class="timeclock-launcher-subtitle">Submit missed punch and shift corrections</span>
-            </button>
+            <?php endif; ?>
             <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_live" data-icon="📍">
                 <span class="timeclock-launcher-title">Live Floor View</span>
                 <span class="timeclock-launcher-subtitle">Who is clocked in and recent punches</span>
-            </button>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_reminders" data-icon="🔔">
-                <span class="timeclock-launcher-title">Reminders & Alarms</span>
-                <span class="timeclock-launcher-subtitle">Upcoming shifts and no-show alerts</span>
             </button>
             <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_admin" data-icon="🛡">
                 <span class="timeclock-launcher-title">Approvals & Audit</span>
@@ -1192,6 +1270,7 @@ include 'includes/header.php';
             </button>
         </div>
     </div>
+    <?php endif; ?>
     <div id="timeclock-popup-backdrop" class="timeclock-popup-backdrop" aria-hidden="true"></div>
 
     <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_punch">
@@ -2521,7 +2600,13 @@ include 'includes/header.php';
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') closeAll();
         });
-        var initialPanel = <?php echo json_encode((string)($_GET['panel'] ?? '')); ?>;
+        var initialPanel = <?php
+            $panelParam = (string)($_GET['panel'] ?? '');
+            if ($panelParam === '' && $isTimeclockAction && !$isKioskMode) {
+                $panelParam = (string)$timeClockDefaultPanel;
+            }
+            echo json_encode($panelParam);
+        ?>;
         if (initialPanel && /^tc_panel_/.test(initialPanel)) {
             openPanel(initialPanel);
         }

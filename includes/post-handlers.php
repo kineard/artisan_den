@@ -17,6 +17,9 @@ if (!in_array($tabParam, ['kpi', 'inventory'], true)) {
     $tabParam = 'kpi';
 }
 $invStateQuery .= '&tab=' . urlencode($tabParam);
+$timeclockReturnAction = in_array((string)$action, ['timeclock', 'employee_dashboard', 'manager_dashboard', 'admin_dashboard'], true)
+    ? (string)$action
+    : 'timeclock';
 $isKioskPost = (string)($_POST['kiosk'] ?? $_GET['kiosk'] ?? '') === '1';
 $kioskParam = $isKioskPost ? '&kiosk=1' : '';
 $denyAccess = function ($message, $redirectAction = null, $forceJson = false) use ($storeId, $date) {
@@ -36,6 +39,15 @@ $denyAccess = function ($message, $redirectAction = null, $forceJson = false) us
     $kiosk = ((string)($_POST['kiosk'] ?? $_GET['kiosk'] ?? '') === '1') ? '&kiosk=1' : '';
     header("Location: index.php?action={$actionParam}&store={$storeId}&date={$date}{$kiosk}&error=" . urlencode($message));
     exit;
+};
+$sessionEmployeeId = (int)($_SESSION['employee_id'] ?? ($_SESSION['user_employee_id'] ?? 0));
+$enforceEmployeeSelfScope = function ($employeeId, $context = 'this action') use ($sessionEmployeeId, $denyAccess) {
+    if (getCurrentUserRole() !== 'employee' || $sessionEmployeeId <= 0) {
+        return;
+    }
+    if ((int)$employeeId !== $sessionEmployeeId) {
+        $denyAccess('Employee role can only use own profile for ' . $context . '.', 'employee_dashboard');
+    }
 };
 
 // Time Clock punch JSON API (used by kiosk offline queue sync)
@@ -65,6 +77,7 @@ if (isset($_POST['timeclock_punch_json'])) {
         echo json_encode(['success' => false, 'message' => 'Employee and PIN are required.']);
         exit;
     }
+    $enforceEmployeeSelfScope($employeeIdTc, 'punching');
     $employee = verifyEmployeePinForStore($employeeIdTc, $storeIdTc, $pinTc);
     if (!$employee) {
         logKioskSyncAttempt($storeIdTc, $employeeIdTc, $deviceId, $punchType, 'failed', 'Invalid employee/PIN for this location.', $payloadMeta);
@@ -227,13 +240,14 @@ if (isset($_POST['timeclock_punch'])) {
     }
 
     if ($storeIdTc <= 0 || $employeeIdTc <= 0 || $pinTc === '') {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}{$kioskParam}&error=" . urlencode('Employee and PIN are required.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}{$kioskParam}&error=" . urlencode('Employee and PIN are required.'));
         exit;
     }
+    $enforceEmployeeSelfScope($employeeIdTc, 'punching');
 
     $employee = verifyEmployeePinForStore($employeeIdTc, $storeIdTc, $pinTc);
     if (!$employee) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}{$kioskParam}&error=" . urlencode('Invalid employee/PIN for this location.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}{$kioskParam}&error=" . urlencode('Invalid employee/PIN for this location.'));
         exit;
     }
 
@@ -253,9 +267,9 @@ if (isset($_POST['timeclock_punch'])) {
         : clockInEmployee((int)$employee['id'], $storeIdTc, $meta);
 
     if (!empty($result['success'])) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}{$kioskParam}&success=" . urlencode($result['message']));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}{$kioskParam}&success=" . urlencode($result['message']));
     } else {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}{$kioskParam}&error=" . urlencode($result['message'] ?? 'Time clock punch failed.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}{$kioskParam}&error=" . urlencode($result['message'] ?? 'Time clock punch failed.'));
     }
     exit;
 }
@@ -275,12 +289,13 @@ if (isset($_POST['timeclock_edit_request_submit'])) {
     }
 
     if ($storeIdTc <= 0 || $employeeIdTc <= 0 || $pinTc === '' || $reason === '') {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}&error=" . urlencode('Employee, PIN, request type, and reason are required.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}&error=" . urlencode('Employee, PIN, request type, and reason are required.'));
         exit;
     }
+    $enforceEmployeeSelfScope($employeeIdTc, 'punch edit requests');
     $employee = verifyEmployeePinForStore($employeeIdTc, $storeIdTc, $pinTc);
     if (!$employee) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}&error=" . urlencode('Invalid employee/PIN for edit request.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}&error=" . urlencode('Invalid employee/PIN for edit request.'));
         exit;
     }
 
@@ -289,11 +304,11 @@ if (isset($_POST['timeclock_edit_request_submit'])) {
     $shiftIdReq = !empty($_POST['request_shift_id']) ? intval($_POST['request_shift_id']) : null;
 
     if ($requestType === 'MISS_CLOCK_IN' && !$reqInUtc) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}&error=" . urlencode('Requested clock-in time is required.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}&error=" . urlencode('Requested clock-in time is required.'));
         exit;
     }
     if ($requestType === 'MISS_CLOCK_OUT' && !$reqOutUtc) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}&error=" . urlencode('Requested clock-out time is required.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}&error=" . urlencode('Requested clock-out time is required.'));
         exit;
     }
     if ($requestType === 'MISS_CLOCK_OUT' && !$shiftIdReq) {
@@ -301,16 +316,16 @@ if (isset($_POST['timeclock_edit_request_submit'])) {
         if ($openShift && !empty($openShift['id'])) {
             $shiftIdReq = (int)$openShift['id'];
         } else {
-            header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}&error=" . urlencode('No open shift found for missed clock-out. Ask manager to use Adjust Existing Shift.'));
+            header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}&error=" . urlencode('No open shift found for missed clock-out. Ask manager to use Adjust Existing Shift.'));
             exit;
         }
     }
     if ($requestType === 'ADJUST_SHIFT' && !$shiftIdReq) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}&error=" . urlencode('Select a shift to adjust.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}&error=" . urlencode('Select a shift to adjust.'));
         exit;
     }
     if ($requestType === 'ADJUST_SHIFT' && !$reqInUtc && !$reqOutUtc) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}&error=" . urlencode('Provide at least one adjusted time.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}&error=" . urlencode('Provide at least one adjusted time.'));
         exit;
     }
 
@@ -325,9 +340,9 @@ if (isset($_POST['timeclock_edit_request_submit'])) {
         'reason' => $reason
     ]);
     if ($ok) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}&success=" . urlencode('Edit request submitted for manager review.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}&success=" . urlencode('Edit request submitted for manager review.'));
     } else {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$date}&error=" . urlencode('Failed to submit edit request.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$date}&error=" . urlencode('Failed to submit edit request.'));
     }
     exit;
 }
@@ -682,9 +697,9 @@ if (isset($_POST['timeclock_task_create'])) {
         $managerName !== '' ? $managerName : 'manager'
     );
     if (!empty($res['success'])) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&success=" . urlencode($res['message'] ?? 'Task created.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&success=" . urlencode($res['message'] ?? 'Task created.'));
     } else {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$dateParam}&panel=tc_panel_tasks&error=" . urlencode($res['message'] ?? 'Failed to create task.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$dateParam}&panel=tc_panel_tasks&error=" . urlencode($res['message'] ?? 'Failed to create task.'));
     }
     exit;
 }
@@ -699,7 +714,7 @@ if (isset($_POST['timeclock_task_toggle'])) {
     }
     $task = getTimeclockTaskById($taskId, $storeIdTc);
     if (!$task) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode('Task not found.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode('Task not found.'));
         exit;
     }
 
@@ -712,16 +727,17 @@ if (isset($_POST['timeclock_task_toggle'])) {
         $employeeIdTc = intval($_POST['employee_id'] ?? 0);
         $pinTc = trim((string)($_POST['pin'] ?? ''));
         if ($employeeIdTc <= 0 || $pinTc === '') {
-            header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode('Employee and PIN are required.'));
+            header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode('Employee and PIN are required.'));
             exit;
         }
+        $enforceEmployeeSelfScope($employeeIdTc, 'task completion');
         $employee = verifyEmployeePinForStore($employeeIdTc, $storeIdTc, $pinTc);
         if (!$employee) {
-            header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode('Invalid employee/PIN for this location.'));
+            header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode('Invalid employee/PIN for this location.'));
             exit;
         }
         if (!empty($task['assigned_employee_id']) && (int)$task['assigned_employee_id'] !== (int)$employee['id']) {
-            header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode('Task is assigned to a different employee.'));
+            header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode('Task is assigned to a different employee.'));
             exit;
         }
         $actorName = trim((string)($employee['full_name'] ?? 'employee'));
@@ -729,9 +745,9 @@ if (isset($_POST['timeclock_task_toggle'])) {
 
     $res = updateTimeclockTaskStatus($taskId, $storeIdTc, $nextStatus, $actorName);
     if (!empty($res['success'])) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&success=" . urlencode($res['message'] ?? 'Task updated.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&success=" . urlencode($res['message'] ?? 'Task updated.'));
     } else {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode($res['message'] ?? 'Failed to update task.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode($res['message'] ?? 'Failed to update task.'));
     }
     exit;
 }
@@ -746,9 +762,9 @@ if (isset($_POST['timeclock_task_delete'])) {
     $managerName = trim((string)($_POST['manager_name'] ?? ''));
     $res = deleteTimeclockTask($taskId, $storeIdTc, $managerName !== '' ? $managerName : 'manager');
     if (!empty($res['success'])) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&success=" . urlencode($res['message'] ?? 'Task deleted.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&success=" . urlencode($res['message'] ?? 'Task deleted.'));
     } else {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode($res['message'] ?? 'Failed to delete task.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$taskDate}&panel=tc_panel_tasks&error=" . urlencode($res['message'] ?? 'Failed to delete task.'));
     }
     exit;
 }
@@ -826,19 +842,20 @@ if (isset($_POST['timeclock_pto_request_submit'])) {
     $dateParam = $_POST['date'] ?? $date;
 
     if ($storeIdTc <= 0 || $employeeIdTc <= 0 || $pinTc === '') {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$dateParam}&error=" . urlencode('Employee and PIN are required for PTO request.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$dateParam}&error=" . urlencode('Employee and PIN are required for PTO request.'));
         exit;
     }
+    $enforceEmployeeSelfScope($employeeIdTc, 'PTO requests');
     $employee = verifyEmployeePinForStore($employeeIdTc, $storeIdTc, $pinTc);
     if (!$employee) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$dateParam}&error=" . urlencode('Invalid employee/PIN for PTO request.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$dateParam}&error=" . urlencode('Invalid employee/PIN for PTO request.'));
         exit;
     }
     $res = createPtoRequest($employeeIdTc, $storeIdTc, $startDate, $endDate, $minutesRequested, $reason, $employee['full_name'] ?? 'employee');
     if (!empty($res['success'])) {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$dateParam}&success=" . urlencode($res['message']));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$dateParam}&success=" . urlencode($res['message']));
     } else {
-        header("Location: index.php?action=timeclock&store={$storeIdTc}&date={$dateParam}&error=" . urlencode($res['message'] ?? 'Failed to submit PTO request.'));
+        header("Location: index.php?action={$timeclockReturnAction}&store={$storeIdTc}&date={$dateParam}&error=" . urlencode($res['message'] ?? 'Failed to submit PTO request.'));
     }
     exit;
 }

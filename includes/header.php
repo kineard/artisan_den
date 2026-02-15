@@ -57,8 +57,18 @@
     if (!in_array($sidebarKpiMode, ['view', 'edit'], true)) {
         $sidebarKpiMode = 'view';
     }
+    $roleForNav = isset($currentUserRole) ? (string)$currentUserRole : getCurrentUserRole();
+    $canManageNav = isset($canManageTimeclock) ? !empty($canManageTimeclock) : currentUserCan('timeclock_manager');
+    $canAdminNav = isset($canAdminTimeclock) ? !empty($canAdminTimeclock) : currentUserCan('timeclock_admin');
+    $isTimeclockNavAction = in_array((string)$currentAction, ['timeclock', 'employee_dashboard', 'manager_dashboard', 'admin_dashboard'], true);
     if ($currentAction === 'dashboard') {
         $topbarTitle = ($sidebarTab === 'inventory') ? 'Inventory' : 'KPIs';
+    } elseif ($currentAction === 'employee_dashboard') {
+        $topbarTitle = 'Employee Dashboard';
+    } elseif ($currentAction === 'manager_dashboard') {
+        $topbarTitle = 'Manager Operations';
+    } elseif ($currentAction === 'admin_dashboard') {
+        $topbarTitle = 'Admin Time Clock';
     } else {
         $topbarTitle = ucfirst($currentAction);
     }
@@ -76,7 +86,13 @@
             <nav class="app-sidebar-nav" id="app-sidebar-nav">
                 <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?><?php echo $sidebarDaysParam; ?>&tab=kpi&mode=<?php echo urlencode($sidebarKpiMode); ?>" class="<?php echo ($currentAction === 'dashboard' && $sidebarTab === 'kpi') ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">▣</span>KPIs</a>
                 <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?><?php echo $sidebarDaysParam; ?>&tab=inventory&mode=view" class="<?php echo ($currentAction === 'dashboard' && $sidebarTab === 'inventory') ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">◫</span>Inventory</a>
-                <a href="?action=timeclock&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="<?php echo $currentAction === 'timeclock' ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">◷</span>Time Clock<?php if (!empty($timeClockNeedsAttention)): ?> <span class="nav-alert-dot" title="Kiosk needs attention"></span><?php endif; ?></a>
+                <a href="?action=employee_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="<?php echo $currentAction === 'employee_dashboard' ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">◔</span>Employee</a>
+                <?php if ($canManageNav): ?>
+                <a href="?action=manager_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="<?php echo in_array($currentAction, ['manager_dashboard', 'timeclock'], true) ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">◷</span>Manager Ops<?php if (!empty($timeClockNeedsAttention)): ?> <span class="nav-alert-dot" title="Needs attention"></span><?php endif; ?></a>
+                <?php endif; ?>
+                <?php if ($canAdminNav): ?>
+                <a href="?action=admin_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="<?php echo $currentAction === 'admin_dashboard' ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">◉</span>Admin Time</a>
+                <?php endif; ?>
                 <a href="?action=history&store=<?php echo $currentStoreId; ?>" class="<?php echo $currentAction === 'history' ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">☰</span>History</a>
                 <a href="import.php"><span class="nav-ico" aria-hidden="true">⇪</span>Import</a>
             </nav>
@@ -90,16 +106,26 @@
         <main class="app-main">
             <div class="app-topbar">
                 <button type="button" id="app-sidebar-toggle" class="app-sidebar-toggle" aria-controls="app-sidebar-nav" aria-expanded="false">Menu</button>
-                <div class="app-topbar-title"><?php echo htmlspecialchars($topbarTitle); ?><?php if ($currentAction === 'timeclock' && !empty($timeClockNeedsAttention)): ?> <span class="app-topbar-badge-alert">Needs Attention</span><?php endif; ?></div>
+                <div class="app-topbar-title"><?php echo htmlspecialchars($topbarTitle); ?><?php if ($isTimeclockNavAction && !empty($timeClockNeedsAttention)): ?> <span class="app-topbar-badge-alert">Needs Attention</span><?php endif; ?></div>
                 <button type="button" class="density-toggle" data-density-toggle="1" aria-pressed="false">Density: Comfortable</button>
                 <button type="button" class="contrast-toggle" data-contrast-toggle="1" aria-pressed="false">High Contrast: Off</button>
             </div>
             <div class="app-submenu">
-                <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=kpi&mode=view" class="app-submenu-item <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'kpi' && $sidebarKpiMode === 'view') ? 'active' : ''; ?>">KPIs View</a>
-                <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=kpi&mode=edit" class="app-submenu-item <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'kpi' && $sidebarKpiMode === 'edit') ? 'active' : ''; ?>">KPIs Edit</a>
-                <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=inventory&mode=view" class="app-submenu-item <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'inventory') ? 'active' : ''; ?>">Inventory</a>
-                <a href="?action=timeclock&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="app-submenu-item <?php echo $currentAction === 'timeclock' ? 'active' : ''; ?>">Time Clock</a>
-                <a href="?action=history&store=<?php echo $currentStoreId; ?>" class="app-submenu-item <?php echo $currentAction === 'history' ? 'active' : ''; ?>">History</a>
-                <a href="import.php" class="app-submenu-item">Import</a>
+                <?php if ($isTimeclockNavAction): ?>
+                    <a href="?action=employee_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="app-submenu-item <?php echo $currentAction === 'employee_dashboard' ? 'active' : ''; ?>">Employee Dashboard</a>
+                    <?php if ($canManageNav): ?>
+                    <a href="?action=manager_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="app-submenu-item <?php echo in_array($currentAction, ['manager_dashboard', 'timeclock'], true) ? 'active' : ''; ?>">Manager Ops</a>
+                    <?php endif; ?>
+                    <?php if ($canAdminNav): ?>
+                    <a href="?action=admin_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="app-submenu-item <?php echo $currentAction === 'admin_dashboard' ? 'active' : ''; ?>">Admin Time</a>
+                    <?php endif; ?>
+                    <a href="?action=timeclock&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="app-submenu-item <?php echo $currentAction === 'timeclock' ? 'active' : ''; ?>">Core Time Clock</a>
+                <?php else: ?>
+                    <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=kpi&mode=view" class="app-submenu-item <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'kpi' && $sidebarKpiMode === 'view') ? 'active' : ''; ?>">KPIs View</a>
+                    <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=kpi&mode=edit" class="app-submenu-item <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'kpi' && $sidebarKpiMode === 'edit') ? 'active' : ''; ?>">KPIs Edit</a>
+                    <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=inventory&mode=view" class="app-submenu-item <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'inventory') ? 'active' : ''; ?>">Inventory</a>
+                    <a href="?action=history&store=<?php echo $currentStoreId; ?>" class="app-submenu-item <?php echo $currentAction === 'history' ? 'active' : ''; ?>">History</a>
+                    <a href="import.php" class="app-submenu-item">Import</a>
+                <?php endif; ?>
             </div>
             <div class="container">
