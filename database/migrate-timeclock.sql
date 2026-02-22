@@ -219,6 +219,51 @@ CREATE TABLE IF NOT EXISTS timeclock_tasks (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS task_type VARCHAR(20) NOT NULL DEFAULT 'DAILY';
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS due_date DATE DEFAULT NULL;
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS checklist_phase VARCHAR(20) NOT NULL DEFAULT 'ANYTIME';
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS audience_type VARCHAR(30) NOT NULL DEFAULT 'ON_DUTY_SHARED';
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS assigned_role_name VARCHAR(120) DEFAULT NULL;
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS window_start_local TIME DEFAULT NULL;
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS window_end_local TIME DEFAULT NULL;
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS completed_by_employee_id INTEGER DEFAULT NULL REFERENCES employees(id) ON DELETE SET NULL;
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS completion_source VARCHAR(30) DEFAULT NULL;
+ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS template_id INTEGER DEFAULT NULL;
+
+CREATE TABLE IF NOT EXISTS timeclock_task_templates (
+    id SERIAL PRIMARY KEY,
+    store_id INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    title VARCHAR(200) NOT NULL,
+    details TEXT DEFAULT NULL,
+    checklist_phase VARCHAR(20) NOT NULL DEFAULT 'ANYTIME',
+    audience_type VARCHAR(30) NOT NULL DEFAULT 'ON_DUTY_SHARED',
+    task_type VARCHAR(20) NOT NULL DEFAULT 'DAILY',
+    assigned_employee_id INTEGER DEFAULT NULL REFERENCES employees(id) ON DELETE SET NULL,
+    assigned_role_name VARCHAR(120) DEFAULT NULL,
+    schedule_shift_id INTEGER DEFAULT NULL REFERENCES timeclock_schedule_shifts(id) ON DELETE SET NULL,
+    due_offset_days INTEGER NOT NULL DEFAULT 0,
+    window_start_local TIME DEFAULT NULL,
+    window_end_local TIME DEFAULT NULL,
+    recurrence_type VARCHAR(20) NOT NULL DEFAULT 'DAILY',
+    recurrence_days VARCHAR(20) DEFAULT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by VARCHAR(120) DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fk_timeclock_tasks_template'
+    ) THEN
+        ALTER TABLE timeclock_tasks
+            ADD CONSTRAINT fk_timeclock_tasks_template
+            FOREIGN KEY (template_id) REFERENCES timeclock_task_templates(id) ON DELETE SET NULL;
+    END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_time_shifts_store_open ON time_shifts(store_id, clock_out_utc);
 CREATE INDEX IF NOT EXISTS idx_time_shifts_employee_in ON time_shifts(employee_id, clock_in_utc DESC);
@@ -233,6 +278,10 @@ CREATE INDEX IF NOT EXISTS idx_timeclock_pto_requests_store_status ON timeclock_
 CREATE INDEX IF NOT EXISTS idx_timeclock_pto_balances_store_employee ON timeclock_pto_balances(store_id, employee_id);
 CREATE INDEX IF NOT EXISTS idx_timeclock_tasks_store_date ON timeclock_tasks(store_id, task_date, status);
 CREATE INDEX IF NOT EXISTS idx_timeclock_tasks_store_employee_date ON timeclock_tasks(store_id, assigned_employee_id, task_date);
+CREATE INDEX IF NOT EXISTS idx_timeclock_tasks_store_phase_status ON timeclock_tasks(store_id, checklist_phase, status, task_date);
+CREATE INDEX IF NOT EXISTS idx_timeclock_tasks_store_audience_status ON timeclock_tasks(store_id, audience_type, status, task_date);
+CREATE INDEX IF NOT EXISTS idx_timeclock_tasks_store_template_date ON timeclock_tasks(store_id, template_id, task_date);
+CREATE INDEX IF NOT EXISTS idx_timeclock_task_templates_store_active ON timeclock_task_templates(store_id, is_active, recurrence_type);
 CREATE INDEX IF NOT EXISTS idx_timeclock_kiosk_sync_store_time ON timeclock_kiosk_sync_log(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_timeclock_kiosk_sync_store_status ON timeclock_kiosk_sync_log(store_id, sync_status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_timeclock_kiosk_sync_store_resolution ON timeclock_kiosk_sync_log(store_id, resolution_status, created_at DESC);
@@ -275,5 +324,6 @@ VALUES
     ('global', NULL, 'reminder_quiet_start', '22:00'),
     ('global', NULL, 'reminder_quiet_end', '06:00'),
     ('global', NULL, 'store_operating_hours_json', '{"mon":{"enabled":true,"open":"09:00","close":"21:00"},"tue":{"enabled":true,"open":"09:00","close":"21:00"},"wed":{"enabled":true,"open":"09:00","close":"21:00"},"thu":{"enabled":true,"open":"09:00","close":"21:00"},"fri":{"enabled":true,"open":"09:00","close":"21:00"},"sat":{"enabled":true,"open":"09:00","close":"21:00"},"sun":{"enabled":true,"open":"09:00","close":"21:00"}}'),
-    ('global', NULL, 'require_network_to_punch', '1')
+    ('global', NULL, 'require_network_to_punch', '1'),
+    ('global', NULL, 'timeclock_task_logic_v2', '0')
 ON CONFLICT (scope, store_id, setting_key) DO NOTHING;

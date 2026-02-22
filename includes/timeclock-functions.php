@@ -57,7 +57,7 @@ function getEmployeeByIdForStore($employeeId, $storeId) {
     try {
         $pdo = getDB();
         $stmt = $pdo->prepare("
-            SELECT e.id, e.full_name, e.pin_hash, e.is_active
+            SELECT e.id, e.full_name, e.role_name, e.pin_hash, e.is_active
             FROM employees e
             INNER JOIN employee_locations el ON el.employee_id = e.id
             WHERE e.id = ? AND el.store_id = ? AND el.is_active = TRUE
@@ -178,27 +178,338 @@ function getTimeclockTaskById($taskId, $storeId) {
     }
 }
 
+function ensureTimeclockTaskSchemaV2() {
+    static $checked = null;
+    if ($checked !== null) {
+        return (bool)$checked;
+    }
+    try {
+        $pdo = getDB();
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS task_type VARCHAR(20) NOT NULL DEFAULT 'DAILY'");
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS due_date DATE DEFAULT NULL");
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS checklist_phase VARCHAR(20) NOT NULL DEFAULT 'ANYTIME'");
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS audience_type VARCHAR(30) NOT NULL DEFAULT 'ON_DUTY_SHARED'");
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS assigned_role_name VARCHAR(120) DEFAULT NULL");
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS window_start_local TIME DEFAULT NULL");
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS window_end_local TIME DEFAULT NULL");
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS completed_by_employee_id INTEGER DEFAULT NULL");
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS completion_source VARCHAR(30) DEFAULT NULL");
+        $pdo->exec("ALTER TABLE timeclock_tasks ADD COLUMN IF NOT EXISTS template_id INTEGER DEFAULT NULL");
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS timeclock_task_templates (
+                id SERIAL PRIMARY KEY,
+                store_id INTEGER NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+                title VARCHAR(200) NOT NULL,
+                details TEXT DEFAULT NULL,
+                checklist_phase VARCHAR(20) NOT NULL DEFAULT 'ANYTIME',
+                audience_type VARCHAR(30) NOT NULL DEFAULT 'ON_DUTY_SHARED',
+                task_type VARCHAR(20) NOT NULL DEFAULT 'DAILY',
+                assigned_employee_id INTEGER DEFAULT NULL REFERENCES employees(id) ON DELETE SET NULL,
+                assigned_role_name VARCHAR(120) DEFAULT NULL,
+                schedule_shift_id INTEGER DEFAULT NULL REFERENCES timeclock_schedule_shifts(id) ON DELETE SET NULL,
+                due_offset_days INTEGER NOT NULL DEFAULT 0,
+                window_start_local TIME DEFAULT NULL,
+                window_end_local TIME DEFAULT NULL,
+                recurrence_type VARCHAR(20) NOT NULL DEFAULT 'DAILY',
+                recurrence_days VARCHAR(20) DEFAULT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_by VARCHAR(120) DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_timeclock_tasks_store_phase_status ON timeclock_tasks(store_id, checklist_phase, status, task_date)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_timeclock_tasks_store_audience_status ON timeclock_tasks(store_id, audience_type, status, task_date)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_timeclock_tasks_store_template_date ON timeclock_tasks(store_id, template_id, task_date)");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_timeclock_task_templates_store_active ON timeclock_task_templates(store_id, is_active, recurrence_type)");
+        $pdo->exec("
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'fk_timeclock_tasks_template'
+                ) THEN
+                    ALTER TABLE timeclock_tasks
+                    ADD CONSTRAINT fk_timeclock_tasks_template
+                    FOREIGN KEY (template_id) REFERENCES timeclock_task_templates(id) ON DELETE SET NULL;
+                END IF;
+            END
+            $$;
+        ");
+        $checked = true;
+    } catch (Throwable $e) {
+        error_log('ensureTimeclockTaskSchemaV2 error: ' . $e->getMessage());
+        $checked = false;
+    }
+    return (bool)$checked;
+}
+
+function normalizeTimeclockTaskPhase($phase) {
+    $phase = strtoupper(trim((string)$phase));
+    return in_array($phase, ['OPENING', 'ANYTIME', 'CLOSING'], true) ? $phase : 'ANYTIME';
+}
+
+function normalizeTimeclockTaskAudience($audience) {
+    $audience = strtoupper(trim((string)$audience));
+    $allowed = ['ON_DUTY_SHARED', 'ASSIGNED_EMPLOYEE', 'ASSIGNED_ROLE', 'MANAGER_ONLY'];
+    return in_array($audience, $allowed, true) ? $audience : 'ON_DUTY_SHARED';
+}
+
+function normalizeTimeclockTemplateRecurrence($recurrence) {
+    $recurrence = strtoupper(trim((string)$recurrence));
+    return in_array($recurrence, ['DAILY', 'WEEKDAYS', 'WEEKLY_SELECTED'], true) ? $recurrence : 'DAILY';
+}
+
+function isTimeclockTaskLogicV2Enabled($storeId) {
+    $flag = (string)getTimeclockSettingValue('timeclock_task_logic_v2', (int)$storeId, '0');
+    return in_array(strtolower(trim($flag)), ['1', 'true', 'yes', 'on'], true);
+}
+
+function getTimeclockTaskTemplatesForStore($storeId, $activeOnly = true) {
+    try {
+        if ((int)$storeId <= 0) {
+            return [];
+        }
+        $pdo = getDB();
+        ensureTimeclockTaskSchemaV2();
+        $sql = "
+            SELECT tt.*, e.full_name AS assigned_employee_name
+            FROM timeclock_task_templates tt
+            LEFT JOIN employees e ON e.id = tt.assigned_employee_id
+            WHERE tt.store_id = ?
+        ";
+        if ($activeOnly) {
+            $sql .= " AND tt.is_active = TRUE";
+        }
+        $sql .= " ORDER BY tt.checklist_phase ASC, tt.title ASC";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([(int)$storeId]);
+        return $stmt->fetchAll();
+    } catch (Throwable $e) {
+        error_log('getTimeclockTaskTemplatesForStore error: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function createTimeclockTaskTemplate($storeId, array $data, $createdBy = 'manager') {
+    try {
+        if ((int)$storeId <= 0) {
+            return ['success' => false, 'message' => 'Store is required.'];
+        }
+        ensureTimeclockTaskSchemaV2();
+        $title = trim((string)($data['title'] ?? ''));
+        if ($title === '') {
+            return ['success' => false, 'message' => 'Template title is required.'];
+        }
+        $taskType = strtoupper(trim((string)($data['task_type'] ?? 'DAILY')));
+        if (!in_array($taskType, ['DAILY', 'ONE_OFF'], true)) {
+            $taskType = 'DAILY';
+        }
+        $phase = normalizeTimeclockTaskPhase($data['checklist_phase'] ?? 'ANYTIME');
+        $audience = normalizeTimeclockTaskAudience($data['audience_type'] ?? 'ON_DUTY_SHARED');
+        $recurrence = normalizeTimeclockTemplateRecurrence($data['recurrence_type'] ?? 'DAILY');
+        $daysCsv = trim((string)($data['recurrence_days'] ?? ''));
+        $dueOffset = max(0, min(30, (int)($data['due_offset_days'] ?? 0)));
+        $windowStart = trim((string)($data['window_start_local'] ?? ''));
+        $windowEnd = trim((string)($data['window_end_local'] ?? ''));
+        $assignedEmployeeId = (int)($data['assigned_employee_id'] ?? 0);
+        $assignedRoleName = trim((string)($data['assigned_role_name'] ?? ''));
+        $scheduleShiftId = (int)($data['schedule_shift_id'] ?? 0);
+
+        if ($audience === 'ASSIGNED_EMPLOYEE' && $assignedEmployeeId <= 0) {
+            return ['success' => false, 'message' => 'Assigned employee is required for this audience.'];
+        }
+        if ($audience === 'ASSIGNED_ROLE' && $assignedRoleName === '') {
+            return ['success' => false, 'message' => 'Assigned role is required for role-based audience.'];
+        }
+        if ($audience !== 'ASSIGNED_EMPLOYEE') {
+            $assignedEmployeeId = 0;
+        }
+        if ($audience !== 'ASSIGNED_ROLE') {
+            $assignedRoleName = '';
+        }
+        if (!in_array($recurrence, ['WEEKLY_SELECTED'], true)) {
+            $daysCsv = null;
+        } else {
+            $parts = array_filter(array_map('trim', explode(',', $daysCsv)), function ($p) {
+                return $p !== '' && preg_match('/^[0-6]$/', $p);
+            });
+            $parts = array_values(array_unique($parts));
+            sort($parts);
+            $daysCsv = !empty($parts) ? implode(',', $parts) : null;
+            if ($daysCsv === null) {
+                return ['success' => false, 'message' => 'Select at least one weekday for weekly-selected recurrence.'];
+            }
+        }
+        if ($windowStart !== '' && !preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $windowStart)) {
+            return ['success' => false, 'message' => 'Invalid visibility start time.'];
+        }
+        if ($windowEnd !== '' && !preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $windowEnd)) {
+            return ['success' => false, 'message' => 'Invalid visibility end time.'];
+        }
+
+        $pdo = getDB();
+        $stmt = $pdo->prepare("
+            INSERT INTO timeclock_task_templates
+                (store_id, title, details, checklist_phase, audience_type, task_type, assigned_employee_id, assigned_role_name, schedule_shift_id, due_offset_days, window_start_local, window_end_local, recurrence_type, recurrence_days, is_active, created_by, updated_at)
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, CURRENT_TIMESTAMP)
+            RETURNING id
+        ");
+        $stmt->execute([
+            (int)$storeId,
+            $title,
+            trim((string)($data['details'] ?? '')) !== '' ? trim((string)($data['details'] ?? '')) : null,
+            $phase,
+            $audience,
+            $taskType,
+            $assignedEmployeeId > 0 ? $assignedEmployeeId : null,
+            $assignedRoleName !== '' ? $assignedRoleName : null,
+            $scheduleShiftId > 0 ? $scheduleShiftId : null,
+            $dueOffset,
+            $windowStart !== '' ? $windowStart : null,
+            $windowEnd !== '' ? $windowEnd : null,
+            $recurrence,
+            $daysCsv,
+            trim((string)$createdBy) !== '' ? trim((string)$createdBy) : null,
+        ]);
+        $row = $stmt->fetch();
+        $templateId = (int)($row['id'] ?? 0);
+        return ['success' => true, 'template_id' => $templateId, 'message' => 'Template saved.'];
+    } catch (Throwable $e) {
+        error_log('createTimeclockTaskTemplate error: ' . $e->getMessage());
+        return ['success' => false, 'message' => 'Unable to save template.'];
+    }
+}
+
+function shouldGenerateTaskTemplateForDate(array $template, $dateYmd) {
+    try {
+        $recurrence = normalizeTimeclockTemplateRecurrence($template['recurrence_type'] ?? 'DAILY');
+        if ($recurrence === 'DAILY') {
+            return true;
+        }
+        $dt = new DateTime((string)$dateYmd, new DateTimeZone(TIMEZONE));
+        $dow = (int)$dt->format('w'); // 0 Sun .. 6 Sat
+        if ($recurrence === 'WEEKDAYS') {
+            return $dow >= 1 && $dow <= 5;
+        }
+        $daysCsv = trim((string)($template['recurrence_days'] ?? ''));
+        $days = array_filter(array_map('trim', explode(',', $daysCsv)), function ($p) {
+            return $p !== '' && preg_match('/^[0-6]$/', $p);
+        });
+        return in_array((string)$dow, $days, true);
+    } catch (Throwable $e) {
+        error_log('shouldGenerateTaskTemplateForDate error: ' . $e->getMessage());
+        return false;
+    }
+}
+
+function generateTimeclockTasksFromTemplates($storeId, $dateYmd, $actorName = 'task-template-generator') {
+    try {
+        if ((int)$storeId <= 0 || !preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$dateYmd)) {
+            return ['success' => false, 'inserted' => 0, 'message' => 'Invalid store/date.'];
+        }
+        ensureTimeclockTaskSchemaV2();
+        $templates = getTimeclockTaskTemplatesForStore((int)$storeId, true);
+        if (empty($templates)) {
+            return ['success' => true, 'inserted' => 0, 'message' => 'No active templates.'];
+        }
+        $pdo = getDB();
+        $checkStmt = $pdo->prepare("SELECT id FROM timeclock_tasks WHERE store_id = ? AND task_date = ? AND template_id = ? LIMIT 1");
+        $inserted = 0;
+        foreach ($templates as $tpl) {
+            $tplId = (int)($tpl['id'] ?? 0);
+            if ($tplId <= 0 || !shouldGenerateTaskTemplateForDate($tpl, (string)$dateYmd)) {
+                continue;
+            }
+            $checkStmt->execute([(int)$storeId, (string)$dateYmd, $tplId]);
+            if ($checkStmt->fetch()) {
+                continue;
+            }
+            $dueOffsetDays = max(0, min(30, (int)($tpl['due_offset_days'] ?? 0)));
+            $dueDateYmd = null;
+            if (strtoupper((string)($tpl['task_type'] ?? 'DAILY')) === 'ONE_OFF') {
+                $dueDateYmd = (new DateTime((string)$dateYmd, new DateTimeZone(TIMEZONE)))
+                    ->modify('+' . $dueOffsetDays . ' day')
+                    ->format('Y-m-d');
+            }
+            $res = createTimeclockTask(
+                (int)$storeId,
+                (string)$dateYmd,
+                (string)($tpl['title'] ?? ''),
+                (string)($tpl['details'] ?? ''),
+                !empty($tpl['assigned_employee_id']) ? (int)$tpl['assigned_employee_id'] : null,
+                !empty($tpl['schedule_shift_id']) ? (int)$tpl['schedule_shift_id'] : null,
+                (string)$actorName,
+                (string)($tpl['task_type'] ?? 'DAILY'),
+                $dueDateYmd,
+                [
+                    'checklist_phase' => (string)($tpl['checklist_phase'] ?? 'ANYTIME'),
+                    'audience_type' => (string)($tpl['audience_type'] ?? 'ON_DUTY_SHARED'),
+                    'assigned_role_name' => (string)($tpl['assigned_role_name'] ?? ''),
+                    'window_start_local' => (string)($tpl['window_start_local'] ?? ''),
+                    'window_end_local' => (string)($tpl['window_end_local'] ?? ''),
+                    'template_id' => $tplId
+                ]
+            );
+            if (!empty($res['success'])) {
+                $inserted++;
+            }
+        }
+        return ['success' => true, 'inserted' => $inserted, 'message' => 'Generated ' . (int)$inserted . ' tasks from templates.'];
+    } catch (Throwable $e) {
+        error_log('generateTimeclockTasksFromTemplates error: ' . $e->getMessage());
+        return ['success' => false, 'inserted' => 0, 'message' => 'Template generation failed.'];
+    }
+}
+
 function getTimeclockTasksForStoreDate($storeId, $dateYmd) {
     try {
         if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$dateYmd)) {
             return [];
         }
         $pdo = getDB();
-        $stmt = $pdo->prepare("
-            SELECT t.*,
-                   e.full_name AS assigned_employee_name,
-                   s.role_name AS assigned_shift_role,
-                   s.start_utc AS assigned_shift_start_utc,
-                   s.end_utc AS assigned_shift_end_utc
-            FROM timeclock_tasks t
-            LEFT JOIN employees e ON e.id = t.assigned_employee_id
-            LEFT JOIN timeclock_schedule_shifts s ON s.id = t.schedule_shift_id
-            WHERE t.store_id = ? AND t.task_date = ?
-            ORDER BY
-                CASE WHEN t.status = 'OPEN' THEN 0 ELSE 1 END,
-                t.created_at ASC
-        ");
-        $stmt->execute([(int)$storeId, (string)$dateYmd]);
+        $schemaV2 = ensureTimeclockTaskSchemaV2();
+        if ($schemaV2) {
+            $stmt = $pdo->prepare("
+                SELECT t.*,
+                       e.full_name AS assigned_employee_name,
+                       s.role_name AS assigned_shift_role,
+                       s.start_utc AS assigned_shift_start_utc,
+                       s.end_utc AS assigned_shift_end_utc
+                FROM timeclock_tasks t
+                LEFT JOIN employees e ON e.id = t.assigned_employee_id
+                LEFT JOIN timeclock_schedule_shifts s ON s.id = t.schedule_shift_id
+                WHERE t.store_id = ?
+                  AND (
+                        (COALESCE(t.task_type, 'DAILY') = 'DAILY' AND t.task_date = ?)
+                        OR
+                        (COALESCE(t.task_type, 'DAILY') = 'ONE_OFF' AND t.task_date <= ?)
+                  )
+                ORDER BY
+                    CASE WHEN COALESCE(t.task_type, 'DAILY') = 'ONE_OFF' THEN 0 ELSE 1 END,
+                    CASE WHEN t.status = 'OPEN' THEN 0 ELSE 1 END,
+                    COALESCE(t.due_date, t.task_date) ASC,
+                    COALESCE(e.full_name, 'ZZZ Unassigned') ASC,
+                    t.created_at ASC
+            ");
+            $stmt->execute([(int)$storeId, (string)$dateYmd, (string)$dateYmd]);
+        } else {
+            $stmt = $pdo->prepare("
+                SELECT t.*,
+                       e.full_name AS assigned_employee_name,
+                       s.role_name AS assigned_shift_role,
+                       s.start_utc AS assigned_shift_start_utc,
+                       s.end_utc AS assigned_shift_end_utc
+                FROM timeclock_tasks t
+                LEFT JOIN employees e ON e.id = t.assigned_employee_id
+                LEFT JOIN timeclock_schedule_shifts s ON s.id = t.schedule_shift_id
+                WHERE t.store_id = ? AND t.task_date = ?
+                ORDER BY
+                    CASE WHEN t.status = 'OPEN' THEN 0 ELSE 1 END,
+                    t.created_at ASC
+            ");
+            $stmt->execute([(int)$storeId, (string)$dateYmd]);
+        }
         return $stmt->fetchAll();
     } catch (Throwable $e) {
         error_log('getTimeclockTasksForStoreDate error: ' . $e->getMessage());
@@ -206,10 +517,262 @@ function getTimeclockTasksForStoreDate($storeId, $dateYmd) {
     }
 }
 
-function createTimeclockTask($storeId, $taskDateYmd, $title, $details, $assignedEmployeeId, $scheduleShiftId, $createdBy) {
+function getEmployeeTaskContextForStore($employeeId, $storeId) {
+    $employee = getEmployeeByIdForStore((int)$employeeId, (int)$storeId);
+    $openShift = getOpenShiftForEmployeeStore((int)$employeeId, (int)$storeId);
+    $roleName = trim((string)($employee['role_name'] ?? ''));
+    return [
+        'is_on_duty' => !empty($openShift),
+        'role_name' => $roleName,
+        'employee' => $employee,
+        'open_shift' => $openShift
+    ];
+}
+
+function isTimeclockTaskVisibleToEmployee(array $taskRow, array $employeeContext, $nowLocalTime = null) {
+    $audience = normalizeTimeclockTaskAudience($taskRow['audience_type'] ?? 'ON_DUTY_SHARED');
+    $assignedEmployeeId = (int)($taskRow['assigned_employee_id'] ?? 0);
+    $employeeId = (int)($employeeContext['employee']['id'] ?? 0);
+    $employeeRoleName = strtoupper(trim((string)($employeeContext['role_name'] ?? '')));
+    $assignedRoleName = strtoupper(trim((string)($taskRow['assigned_role_name'] ?? '')));
+    $isOnDuty = !empty($employeeContext['is_on_duty']);
+    if ($audience === 'MANAGER_ONLY') {
+        return false;
+    }
+    if ($audience === 'ASSIGNED_EMPLOYEE') {
+        return $employeeId > 0 && $assignedEmployeeId === $employeeId;
+    }
+    if ($audience === 'ASSIGNED_ROLE') {
+        if (!$isOnDuty || $assignedRoleName === '' || $employeeRoleName === '') {
+            return false;
+        }
+        return $assignedRoleName === $employeeRoleName;
+    }
+    if ($audience === 'ON_DUTY_SHARED' && !$isOnDuty) {
+        return false;
+    }
+    if ($nowLocalTime !== null) {
+        $windowStart = trim((string)($taskRow['window_start_local'] ?? ''));
+        $windowEnd = trim((string)($taskRow['window_end_local'] ?? ''));
+        if ($windowStart !== '' && $windowEnd !== '') {
+            $now = trim((string)$nowLocalTime);
+            if ($windowStart <= $windowEnd) {
+                if (!($now >= $windowStart && $now <= $windowEnd)) {
+                    return false;
+                }
+            } else {
+                // Overnight window.
+                if (!($now >= $windowStart || $now <= $windowEnd)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+function getVisibleTasksForEmployeeOnDate($storeId, $employeeId, $dateYmd) {
+    $rows = getTimeclockTasksForStoreDate((int)$storeId, (string)$dateYmd);
+    if ((int)$employeeId <= 0) {
+        return [];
+    }
+    $ctx = getEmployeeTaskContextForStore((int)$employeeId, (int)$storeId);
+    $nowLocalTime = (new DateTime('now', new DateTimeZone(TIMEZONE)))->format('H:i:s');
+    return array_values(array_filter($rows, function ($taskRow) use ($ctx, $nowLocalTime) {
+        return isTimeclockTaskVisibleToEmployee((array)$taskRow, $ctx, $nowLocalTime);
+    }));
+}
+
+function getTimeclockTasksForStoreDateRange($storeId, $startDateYmd, $endDateYmd) {
+    try {
+        if ((int)$storeId <= 0) {
+            return [];
+        }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$startDateYmd) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$endDateYmd)) {
+            return [];
+        }
+        if ((string)$startDateYmd > (string)$endDateYmd) {
+            $tmp = $startDateYmd;
+            $startDateYmd = $endDateYmd;
+            $endDateYmd = $tmp;
+        }
+        $pdo = getDB();
+        $schemaV2 = ensureTimeclockTaskSchemaV2();
+        if ($schemaV2) {
+            $stmt = $pdo->prepare("
+                SELECT t.*,
+                       e.full_name AS assigned_employee_name
+                FROM timeclock_tasks t
+                LEFT JOIN employees e ON e.id = t.assigned_employee_id
+                WHERE t.store_id = ?
+                  AND t.task_date >= ?
+                  AND t.task_date <= ?
+                ORDER BY t.task_date ASC, COALESCE(e.full_name, 'ZZZ Unassigned') ASC, t.created_at ASC
+            ");
+            $stmt->execute([(int)$storeId, (string)$startDateYmd, (string)$endDateYmd]);
+        } else {
+            $stmt = $pdo->prepare("
+                SELECT t.*,
+                       e.full_name AS assigned_employee_name
+                FROM timeclock_tasks t
+                LEFT JOIN employees e ON e.id = t.assigned_employee_id
+                WHERE t.store_id = ?
+                  AND t.task_date >= ?
+                  AND t.task_date <= ?
+                ORDER BY t.task_date ASC, COALESCE(e.full_name, 'ZZZ Unassigned') ASC, t.created_at ASC
+            ");
+            $stmt->execute([(int)$storeId, (string)$startDateYmd, (string)$endDateYmd]);
+        }
+        return $stmt->fetchAll();
+    } catch (Throwable $e) {
+        error_log('getTimeclockTasksForStoreDateRange error: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function getTimeclockTaskSummaryForRange($storeId, $startDateYmd, $endDateYmd) {
+    $out = [
+        'rows' => [],
+        'totals' => [
+            'total' => 0,
+            'done' => 0,
+            'open' => 0,
+            'overdue' => 0,
+            'unclaimed_shared' => 0,
+            'missed_recurring' => 0
+        ],
+        'phase' => [
+            'OPENING' => ['total' => 0, 'done' => 0, 'open' => 0, 'overdue' => 0],
+            'ANYTIME' => ['total' => 0, 'done' => 0, 'open' => 0, 'overdue' => 0],
+            'CLOSING' => ['total' => 0, 'done' => 0, 'open' => 0, 'overdue' => 0]
+        ]
+    ];
+    try {
+        $rows = getTimeclockTasksForStoreDateRange((int)$storeId, (string)$startDateYmd, (string)$endDateYmd);
+        if (empty($rows)) {
+            return $out;
+        }
+        $todayYmd = (new DateTime('now', new DateTimeZone(TIMEZONE)))->format('Y-m-d');
+        $byEmployee = [];
+        foreach ($rows as $task) {
+            $employee = trim((string)($task['assigned_employee_name'] ?? ''));
+            if ($employee === '') {
+                $employee = 'Unassigned';
+            }
+            if (!isset($byEmployee[$employee])) {
+                $byEmployee[$employee] = ['employee' => $employee, 'total' => 0, 'done' => 0, 'open' => 0, 'overdue' => 0];
+            }
+            $status = strtoupper((string)($task['status'] ?? 'OPEN'));
+            $taskType = strtoupper((string)($task['task_type'] ?? 'DAILY'));
+            $taskPhase = normalizeTimeclockTaskPhase((string)($task['checklist_phase'] ?? 'ANYTIME'));
+            $taskAudience = normalizeTimeclockTaskAudience((string)($task['audience_type'] ?? 'ON_DUTY_SHARED'));
+            $taskDate = (string)($task['task_date'] ?? '');
+            $dueDate = (string)($task['due_date'] ?? '');
+            $isRecurring = !empty($task['template_id']);
+            $isOverdue = ($status !== 'DONE') && (
+                ($taskType === 'ONE_OFF' && $dueDate !== '' && $dueDate < $todayYmd)
+                || ($taskType !== 'ONE_OFF' && $taskDate !== '' && $taskDate < $todayYmd)
+            );
+
+            $byEmployee[$employee]['total']++;
+            $out['totals']['total']++;
+            $out['phase'][$taskPhase]['total']++;
+            if ($status === 'DONE') {
+                $byEmployee[$employee]['done']++;
+                $out['totals']['done']++;
+                $out['phase'][$taskPhase]['done']++;
+            } else {
+                $byEmployee[$employee]['open']++;
+                $out['totals']['open']++;
+                $out['phase'][$taskPhase]['open']++;
+                if ($taskAudience === 'ON_DUTY_SHARED' && empty($task['completed_by_employee_id'])) {
+                    $out['totals']['unclaimed_shared']++;
+                }
+                if ($isOverdue) {
+                    $byEmployee[$employee]['overdue']++;
+                    $out['totals']['overdue']++;
+                    $out['phase'][$taskPhase]['overdue']++;
+                    if ($isRecurring) {
+                        $out['totals']['missed_recurring']++;
+                    }
+                }
+            }
+        }
+        ksort($byEmployee);
+        foreach ($byEmployee as $row) {
+            $row['completion_pct'] = $row['total'] > 0 ? (int)round(($row['done'] / $row['total']) * 100) : 0;
+            $out['rows'][] = $row;
+        }
+        return $out;
+    } catch (Throwable $e) {
+        error_log('getTimeclockTaskSummaryForRange error: ' . $e->getMessage());
+        return $out;
+    }
+}
+
+function backfillTimeclockTaskLogicV2Defaults($storeId, $actorName = 'manager') {
+    try {
+        if ((int)$storeId <= 0) {
+            return ['success' => false, 'updated' => 0, 'message' => 'Store is required.'];
+        }
+        ensureTimeclockTaskSchemaV2();
+        $pdo = getDB();
+        $stmt = $pdo->prepare("
+            UPDATE timeclock_tasks
+            SET checklist_phase = CASE
+                    WHEN checklist_phase IS NULL OR checklist_phase = '' THEN 'ANYTIME'
+                    ELSE checklist_phase
+                END,
+                audience_type = CASE
+                    WHEN audience_type IS NULL OR audience_type = '' THEN
+                        CASE
+                            WHEN assigned_employee_id IS NULL THEN 'ON_DUTY_SHARED'
+                            ELSE 'ASSIGNED_EMPLOYEE'
+                        END
+                    ELSE audience_type
+                END,
+                assigned_role_name = CASE
+                    WHEN audience_type = 'ASSIGNED_ROLE' AND (assigned_role_name IS NULL OR assigned_role_name = '') THEN NULL
+                    ELSE assigned_role_name
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE store_id = ?
+              AND (
+                    checklist_phase IS NULL OR checklist_phase = ''
+                    OR audience_type IS NULL OR audience_type = ''
+                  )
+        ");
+        $stmt->execute([(int)$storeId]);
+        $updated = (int)$stmt->rowCount();
+        logTimeclockAudit((int)$storeId, null, (string)$actorName, 'TASK_LOGIC_V2_BACKFILL', [
+            'rows_updated' => $updated
+        ]);
+        return ['success' => true, 'updated' => $updated, 'message' => 'Backfill complete.'];
+    } catch (Throwable $e) {
+        error_log('backfillTimeclockTaskLogicV2Defaults error: ' . $e->getMessage());
+        return ['success' => false, 'updated' => 0, 'message' => 'Backfill failed.'];
+    }
+}
+
+function createTimeclockTask($storeId, $taskDateYmd, $title, $details, $assignedEmployeeId, $scheduleShiftId, $createdBy, $taskType = 'DAILY', $dueDateYmd = null, array $options = []) {
     try {
         if ((int)$storeId <= 0 || !preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$taskDateYmd)) {
             return ['success' => false, 'message' => 'Invalid task date/store.'];
+        }
+        $taskType = strtoupper(trim((string)$taskType));
+        if (!in_array($taskType, ['DAILY', 'ONE_OFF'], true)) {
+            $taskType = 'DAILY';
+        }
+        $dueDateYmd = trim((string)$dueDateYmd);
+        if ($taskType === 'ONE_OFF') {
+            if ($dueDateYmd === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $dueDateYmd)) {
+                return ['success' => false, 'message' => 'Due date is required for one-off tasks.'];
+            }
+            if ($dueDateYmd < (string)$taskDateYmd) {
+                return ['success' => false, 'message' => 'Due date cannot be before assigned date.'];
+            }
+        } else {
+            $dueDateYmd = null;
         }
         $title = trim((string)$title);
         if ($title === '') {
@@ -217,6 +780,18 @@ function createTimeclockTask($storeId, $taskDateYmd, $title, $details, $assigned
         }
         $assignedEmployeeId = (int)$assignedEmployeeId;
         $scheduleShiftId = (int)$scheduleShiftId;
+        $checklistPhase = normalizeTimeclockTaskPhase($options['checklist_phase'] ?? 'ANYTIME');
+        $audienceType = normalizeTimeclockTaskAudience($options['audience_type'] ?? (($assignedEmployeeId > 0) ? 'ASSIGNED_EMPLOYEE' : 'ON_DUTY_SHARED'));
+        $assignedRoleName = trim((string)($options['assigned_role_name'] ?? ''));
+        if ($audienceType !== 'ASSIGNED_EMPLOYEE') {
+            $assignedEmployeeId = 0;
+        }
+        if ($audienceType !== 'ASSIGNED_ROLE') {
+            $assignedRoleName = '';
+        }
+        $windowStartLocal = trim((string)($options['window_start_local'] ?? ''));
+        $windowEndLocal = trim((string)($options['window_end_local'] ?? ''));
+        $templateId = (int)($options['template_id'] ?? 0);
         if ($scheduleShiftId > 0) {
             $shift = getScheduleShiftById($scheduleShiftId, (int)$storeId);
             if (!$shift) {
@@ -227,27 +802,62 @@ function createTimeclockTask($storeId, $taskDateYmd, $title, $details, $assigned
             }
         }
         $pdo = getDB();
-        $stmt = $pdo->prepare("
-            INSERT INTO timeclock_tasks
-                (store_id, task_date, schedule_shift_id, assigned_employee_id, title, details, status, created_by, updated_at)
-            VALUES
-                (?, ?, ?, ?, ?, ?, 'OPEN', ?, CURRENT_TIMESTAMP)
-            RETURNING id
-        ");
-        $stmt->execute([
-            (int)$storeId,
-            (string)$taskDateYmd,
-            $scheduleShiftId > 0 ? $scheduleShiftId : null,
-            $assignedEmployeeId > 0 ? $assignedEmployeeId : null,
-            $title,
-            trim((string)$details) !== '' ? trim((string)$details) : null,
-            trim((string)$createdBy) !== '' ? trim((string)$createdBy) : null
-        ]);
+        $schemaV2 = ensureTimeclockTaskSchemaV2();
+        if ($schemaV2) {
+            $stmt = $pdo->prepare("
+                INSERT INTO timeclock_tasks
+                    (store_id, task_date, due_date, task_type, checklist_phase, audience_type, assigned_role_name, window_start_local, window_end_local, template_id, schedule_shift_id, assigned_employee_id, title, details, status, created_by, updated_at)
+                VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, CURRENT_TIMESTAMP)
+                RETURNING id
+            ");
+            $stmt->execute([
+                (int)$storeId,
+                (string)$taskDateYmd,
+                $dueDateYmd,
+                $taskType,
+                $checklistPhase,
+                $audienceType,
+                $assignedRoleName !== '' ? $assignedRoleName : null,
+                $windowStartLocal !== '' ? $windowStartLocal : null,
+                $windowEndLocal !== '' ? $windowEndLocal : null,
+                $templateId > 0 ? $templateId : null,
+                $scheduleShiftId > 0 ? $scheduleShiftId : null,
+                $assignedEmployeeId > 0 ? $assignedEmployeeId : null,
+                $title,
+                trim((string)$details) !== '' ? trim((string)$details) : null,
+                trim((string)$createdBy) !== '' ? trim((string)$createdBy) : null
+            ]);
+        } else {
+            if ($taskType === 'ONE_OFF') {
+                return ['success' => false, 'message' => 'Task schema update required for one-off tasks. Run migration and retry.'];
+            }
+            $stmt = $pdo->prepare("
+                INSERT INTO timeclock_tasks
+                    (store_id, task_date, schedule_shift_id, assigned_employee_id, title, details, status, created_by, updated_at)
+                VALUES
+                    (?, ?, ?, ?, ?, ?, 'OPEN', ?, CURRENT_TIMESTAMP)
+                RETURNING id
+            ");
+            $stmt->execute([
+                (int)$storeId,
+                (string)$taskDateYmd,
+                $scheduleShiftId > 0 ? $scheduleShiftId : null,
+                $assignedEmployeeId > 0 ? $assignedEmployeeId : null,
+                $title,
+                trim((string)$details) !== '' ? trim((string)$details) : null,
+                trim((string)$createdBy) !== '' ? trim((string)$createdBy) : null
+            ]);
+        }
         $row = $stmt->fetch();
         $taskId = (int)($row['id'] ?? 0);
         logTimeclockAudit((int)$storeId, $assignedEmployeeId > 0 ? $assignedEmployeeId : null, (string)$createdBy, 'TASK_CREATED', [
             'task_id' => $taskId,
             'task_date' => $taskDateYmd,
+            'due_date' => $dueDateYmd,
+            'task_type' => $taskType,
+            'checklist_phase' => $checklistPhase,
+            'audience_type' => $audienceType,
             'title' => $title
         ]);
         return ['success' => true, 'task_id' => $taskId, 'message' => 'Task created.'];
@@ -257,7 +867,7 @@ function createTimeclockTask($storeId, $taskDateYmd, $title, $details, $assigned
     }
 }
 
-function updateTimeclockTaskStatus($taskId, $storeId, $status, $actorName) {
+function updateTimeclockTaskStatus($taskId, $storeId, $status, $actorName, $actorEmployeeId = null, $completionSource = null) {
     try {
         $status = strtoupper(trim((string)$status));
         if (!in_array($status, ['OPEN', 'DONE'], true)) {
@@ -267,18 +877,38 @@ function updateTimeclockTaskStatus($taskId, $storeId, $status, $actorName) {
         if (!$task) {
             return ['success' => false, 'message' => 'Task not found.'];
         }
+        $currentStatus = strtoupper((string)($task['status'] ?? 'OPEN'));
+        if ($status === 'DONE' && $currentStatus === 'DONE') {
+            return ['success' => false, 'message' => 'Task is already completed.'];
+        }
         $pdo = getDB();
         if ($status === 'DONE') {
             $stmt = $pdo->prepare("
                 UPDATE timeclock_tasks
-                SET status = 'DONE', completed_at = CURRENT_TIMESTAMP, completed_by = ?, updated_at = CURRENT_TIMESTAMP
+                SET status = 'DONE',
+                    completed_at = CURRENT_TIMESTAMP,
+                    completed_by = ?,
+                    completed_by_employee_id = ?,
+                    completion_source = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND store_id = ?
             ");
-            $stmt->execute([trim((string)$actorName), (int)$taskId, (int)$storeId]);
+            $stmt->execute([
+                trim((string)$actorName),
+                !empty($actorEmployeeId) ? (int)$actorEmployeeId : null,
+                trim((string)$completionSource) !== '' ? trim((string)$completionSource) : 'manual',
+                (int)$taskId,
+                (int)$storeId
+            ]);
         } else {
             $stmt = $pdo->prepare("
                 UPDATE timeclock_tasks
-                SET status = 'OPEN', completed_at = NULL, completed_by = NULL, updated_at = CURRENT_TIMESTAMP
+                SET status = 'OPEN',
+                    completed_at = NULL,
+                    completed_by = NULL,
+                    completed_by_employee_id = NULL,
+                    completion_source = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND store_id = ?
             ");
             $stmt->execute([(int)$taskId, (int)$storeId]);
@@ -313,6 +943,61 @@ function deleteTimeclockTask($taskId, $storeId, $actorName) {
     }
 }
 
+function seedDemoTimeclockTasksForDate($storeId, $dateYmd, $actorName = 'seed-task-v2') {
+    try {
+        if ((int)$storeId <= 0 || !preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$dateYmd)) {
+            return ['success' => false, 'message' => 'Invalid store/date for task seed.'];
+        }
+        $pdo = getDB();
+        $employees = getTimeClockEmployeesForStore((int)$storeId);
+        $employeeByName = [];
+        foreach ($employees as $emp) {
+            $name = trim((string)($emp['full_name'] ?? ''));
+            if ($name !== '') $employeeByName[$name] = (int)($emp['id'] ?? 0);
+        }
+        $daily = [
+            ['Open front doors and lights', 'Unlock entry, turn on lights, verify music and thermostat.', 'Alex Manager'],
+            ['Count and log register till', 'Verify starting cash and log variance if needed.', 'Sam Cashier'],
+            ['Clean bathrooms', 'Sanitize surfaces, restock paper products, and check trash.', 'Jordan Stock'],
+            ['Front shelves zone and face', 'Straighten front-facing shelves and fill visible gaps.', 'Sam Cashier'],
+            ['Sweep and mop high-traffic floor', 'Entrance, checkout lane, and aisles near front.', 'Jordan Stock'],
+            ['Restock shopping bags and receipt paper', 'Refill checkout consumables and backup stock.', 'Sam Cashier'],
+            ['Check promo signage accuracy', 'Confirm active promotions and remove expired signs.', 'Alex Manager'],
+            ['Temperature and cooler check', 'Log cooler/freezer readings per SOP.', 'Jordan Stock'],
+            ['Trash and cardboard run', 'Take trash/cardboard to back area and replace liners.', 'Jordan Stock'],
+            ['Close out and secure register area', 'Tidy counter, secure cash drawer, and wipe surfaces.', 'Alex Manager'],
+        ];
+        $oneOff = [
+            ['Send email to ABC vendor', 'Send today follow-up email for current pricing and lead times.', $dateYmd, $dateYmd, 'Alex Manager'],
+            ['Need list of 6 new vendors for XYZ product', 'Compile and submit 6 qualified vendor options with contact and MOQ details.', $dateYmd, '2026-02-26', 'Alex Manager'],
+            ['Prepare spring endcap reset proposal', 'Draft planogram notes and material needs for next manager review.', $dateYmd, '2026-02-23', 'Sam Cashier'],
+        ];
+
+        $inserted = 0;
+        $existsStmt = $pdo->prepare("SELECT id FROM timeclock_tasks WHERE store_id = ? AND task_date = ? AND title = ? LIMIT 1");
+        foreach ($daily as $d) {
+            [$title, $details, $empName] = $d;
+            $existsStmt->execute([(int)$storeId, (string)$dateYmd, (string)$title]);
+            if ($existsStmt->fetch()) continue;
+            $empId = (int)($employeeByName[$empName] ?? 0);
+            $res = createTimeclockTask((int)$storeId, (string)$dateYmd, (string)$title, (string)$details, $empId > 0 ? $empId : null, null, (string)$actorName, 'DAILY', null);
+            if (!empty($res['success'])) $inserted++;
+        }
+        foreach ($oneOff as $o) {
+            [$title, $details, $assignedDate, $dueDate, $empName] = $o;
+            $existsStmt->execute([(int)$storeId, (string)$assignedDate, (string)$title]);
+            if ($existsStmt->fetch()) continue;
+            $empId = (int)($employeeByName[$empName] ?? 0);
+            $res = createTimeclockTask((int)$storeId, (string)$assignedDate, (string)$title, (string)$details, $empId > 0 ? $empId : null, null, (string)$actorName, 'ONE_OFF', (string)$dueDate);
+            if (!empty($res['success'])) $inserted++;
+        }
+        return ['success' => true, 'inserted' => $inserted, 'message' => 'Task seed complete. Added ' . (int)$inserted . ' tasks.'];
+    } catch (Throwable $e) {
+        error_log('seedDemoTimeclockTasksForDate error: ' . $e->getMessage());
+        return ['success' => false, 'message' => 'Task seed failed.'];
+    }
+}
+
 function hasWorkedShiftOverlap($employeeId, $storeId, $startUtc, $endUtc) {
     try {
         $pdo = getDB();
@@ -335,6 +1020,25 @@ function hasWorkedShiftOverlap($employeeId, $storeId, $startUtc, $endUtc) {
 
 function createTimePunchEvent($data) {
     try {
+        $toPgBool = function ($value, $nullable = true) {
+            if ($value === null) {
+                return $nullable ? null : 'false';
+            }
+            if (is_bool($value)) {
+                return $value ? 'true' : 'false';
+            }
+            $str = strtolower(trim((string)$value));
+            if ($str === '') {
+                return $nullable ? null : 'false';
+            }
+            if (in_array($str, ['1', 'true', 't', 'yes', 'y', 'on'], true)) {
+                return 'true';
+            }
+            if (in_array($str, ['0', 'false', 'f', 'no', 'n', 'off'], true)) {
+                return 'false';
+            }
+            return $nullable ? null : 'false';
+        };
         $pdo = getDB();
         $stmt = $pdo->prepare("
             INSERT INTO time_punch_events
@@ -353,9 +1057,9 @@ function createTimePunchEvent($data) {
             $data['gps_lat'] ?? null,
             $data['gps_lng'] ?? null,
             $data['gps_accuracy_m'] ?? null,
-            !empty($data['gps_captured']),
+            $toPgBool($data['gps_captured'] ?? null, false),
             $data['gps_status'] ?? 'unavailable',
-            isset($data['geofence_pass']) ? (bool)$data['geofence_pass'] : null,
+            $toPgBool($data['geofence_pass'] ?? null, true),
             $data['geofence_distance_m'] ?? null,
             $data['note'] ?? null,
             $data['created_by'] ?? 'employee'
@@ -373,6 +1077,25 @@ function clockInEmployee($employeeId, $storeId, $meta = []) {
     }
 
     try {
+        $toPgBool = function ($value, $nullable = true) {
+            if ($value === null) {
+                return $nullable ? null : 'false';
+            }
+            if (is_bool($value)) {
+                return $value ? 'true' : 'false';
+            }
+            $str = strtolower(trim((string)$value));
+            if ($str === '') {
+                return $nullable ? null : 'false';
+            }
+            if (in_array($str, ['1', 'true', 't', 'yes', 'y', 'on'], true)) {
+                return 'true';
+            }
+            if (in_array($str, ['0', 'false', 'f', 'no', 'n', 'off'], true)) {
+                return 'false';
+            }
+            return $nullable ? null : 'false';
+        };
         $pdo = getDB();
         $nowUtc = (new DateTime('now', new DateTimeZone('UTC')))->format('Y-m-d H:i:sP');
         $localDate = getLocalDateYmdFromUtcOrNull($nowUtc);
@@ -406,9 +1129,9 @@ function clockInEmployee($employeeId, $storeId, $meta = []) {
             $meta['gps_lat'] ?? null,
             $meta['gps_lng'] ?? null,
             $meta['gps_accuracy_m'] ?? null,
-            !empty($meta['gps_captured']),
+            $toPgBool($meta['gps_captured'] ?? null, false),
             $meta['gps_status'] ?? 'unavailable',
-            isset($meta['geofence_pass']) ? (bool)$meta['geofence_pass'] : null,
+            $toPgBool($meta['geofence_pass'] ?? null, true),
             $meta['geofence_distance_m'] ?? null
         ]);
         $row = $stmt->fetch();
@@ -440,7 +1163,7 @@ function clockInEmployee($employeeId, $storeId, $meta = []) {
         return ['success' => true, 'message' => $msg];
     } catch (Throwable $e) {
         error_log('clockInEmployee error: ' . $e->getMessage());
-        return ['success' => false, 'message' => 'Clock-in failed.'];
+        return ['success' => false, 'message' => 'Clock-in failed: ' . (string)$e->getMessage()];
     }
 }
 
@@ -451,6 +1174,25 @@ function clockOutEmployee($employeeId, $storeId, $meta = []) {
     }
 
     try {
+        $toPgBool = function ($value, $nullable = true) {
+            if ($value === null) {
+                return $nullable ? null : 'false';
+            }
+            if (is_bool($value)) {
+                return $value ? 'true' : 'false';
+            }
+            $str = strtolower(trim((string)$value));
+            if ($str === '') {
+                return $nullable ? null : 'false';
+            }
+            if (in_array($str, ['1', 'true', 't', 'yes', 'y', 'on'], true)) {
+                return 'true';
+            }
+            if (in_array($str, ['0', 'false', 'f', 'no', 'n', 'off'], true)) {
+                return 'false';
+            }
+            return $nullable ? null : 'false';
+        };
         $pdo = getDB();
         $nowUtc = (new DateTime('now', new DateTimeZone('UTC')))->format('Y-m-d H:i:sP');
         [$lockStartDate, $lockEndDate] = getLocalDateRangeFromUtc((string)($openShift['clock_in_utc'] ?? null), $nowUtc);
@@ -491,9 +1233,9 @@ function clockOutEmployee($employeeId, $storeId, $meta = []) {
             'gps_lat' => $meta['gps_lat'] ?? null,
             'gps_lng' => $meta['gps_lng'] ?? null,
             'gps_accuracy_m' => $meta['gps_accuracy_m'] ?? null,
-            'gps_captured' => !empty($meta['gps_captured']),
+            'gps_captured' => $toPgBool($meta['gps_captured'] ?? null, false),
             'gps_status' => $meta['gps_status'] ?? 'unavailable',
-            'geofence_pass' => isset($meta['geofence_pass']) ? (bool)$meta['geofence_pass'] : null,
+            'geofence_pass' => $toPgBool($meta['geofence_pass'] ?? null, true),
             'geofence_distance_m' => $meta['geofence_distance_m'] ?? null,
             'note' => $meta['note'] ?? null,
             'created_by' => 'employee'
@@ -506,7 +1248,7 @@ function clockOutEmployee($employeeId, $storeId, $meta = []) {
         return ['success' => true, 'message' => $msg];
     } catch (Throwable $e) {
         error_log('clockOutEmployee error: ' . $e->getMessage());
-        return ['success' => false, 'message' => 'Clock-out failed.'];
+        return ['success' => false, 'message' => 'Clock-out failed: ' . (string)$e->getMessage()];
     }
 }
 
@@ -746,7 +1488,7 @@ function formatUtcTimestampForDisplay($utcTs, $timezone = TIMEZONE) {
     try {
         $dt = new DateTime($utcTs, new DateTimeZone('UTC'));
         $dt->setTimezone(new DateTimeZone($timezone));
-        return $dt->format('M j, g:i A');
+        return $dt->format('m/d/y g:i A');
     } catch (Throwable $e) {
         return (string)$utcTs;
     }

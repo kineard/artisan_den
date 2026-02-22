@@ -83,9 +83,11 @@ header('Content-Type: text/html; charset=UTF-8');
 $scriptVersion = (int)@filemtime(__DIR__ . '/js/main.js');
 $chartVersion = (int)@filemtime(__DIR__ . '/js/chart.umd.min.js');
 $action = $_GET['action'] ?? 'dashboard';
+$isScheduleCenterPage = ($action === 'schedule_center');
 $timeclockRoleSurfaceByAction = [
     'employee_dashboard' => 'employee',
     'manager_dashboard' => 'manager',
+    'schedule_center' => 'manager',
     'admin_dashboard' => 'admin',
 ];
 $isTimeclockAction = ($action === 'timeclock' || isset($timeclockRoleSurfaceByAction[$action]));
@@ -110,8 +112,8 @@ if (isset($_GET['error'])) {
 }
 $storeId = isset($_GET['store']) ? intval($_GET['store']) : null;
 $date = $_GET['date'] ?? date('Y-m-d');
-$view = $_GET['view'] ?? 'week'; // week, month, or custom
-$customDays = isset($_GET['days']) ? intval($_GET['days']) : 7;
+$view = $_GET['view'] ?? 'custom'; // week, month, or custom
+$customDays = isset($_GET['days']) ? intval($_GET['days']) : 30;
 $customDays = max(1, min(30, $customDays)); // clamp 1-30 for inventory days dropdown
 $chartProductId = isset($_GET['chart_product_id']) ? intval($_GET['chart_product_id']) : null;
 $chartDays = isset($_GET['chart_days']) ? intval($_GET['chart_days']) : 30;
@@ -121,7 +123,7 @@ if (!$storeId && !empty($stores)) {
     $storeId = $stores[0]['id'];
 }
 $invLimitParam = $_GET['inventory_limit'] ?? $_POST['inventory_limit'] ?? '10';
-$invDaysParam = isset($_GET['inventory_days']) ? max(1, min(30, (int)$_GET['inventory_days'])) : (isset($_POST['inventory_days']) ? max(1, min(30, (int)$_POST['inventory_days'])) : null);
+$invDaysParam = isset($_GET['inventory_days']) ? max(1, min(30, (int)$_GET['inventory_days'])) : (isset($_POST['inventory_days']) ? max(1, min(30, (int)$_POST['inventory_days'])) : 2);
 $invSortParam = $_GET['inventory_sort'] ?? $_POST['inventory_sort'] ?? 'status';
 $dashboardTab = $_GET['tab'] ?? $_POST['tab'] ?? 'kpi';
 if (!in_array($dashboardTab, ['kpi', 'inventory'], true)) {
@@ -137,6 +139,58 @@ $canWriteInventory = currentUserCan('inventory_write');
 $canManageTimeclock = currentUserCan('timeclock_manager');
 $canAdminTimeclock = currentUserCan('timeclock_admin');
 $currentUserName = getCurrentUserDisplayName();
+$sessionEmployeeIdTc = (int)($_SESSION['employee_id'] ?? ($_SESSION['user_employee_id'] ?? 0));
+if ($action === 'schedule_center' && !$canManageTimeclock) {
+    $qs = $_GET;
+    $qs['action'] = 'employee_dashboard';
+    header('Location: index.php?' . http_build_query($qs));
+    exit;
+}
+if (isset($_GET['switch_user'])) {
+    $switchEmployeeId = (int)($_GET['switch_user_employee_id'] ?? 0);
+    $switchRole = normalizeUserRole((string)($_GET['switch_user_role'] ?? 'employee'));
+    $switchName = '';
+    if ($switchEmployeeId > 0) {
+        $switchOptions = $storeId > 0 ? getTimeClockEmployeesForStore((int)$storeId) : [];
+        $matched = null;
+        foreach ($switchOptions as $opt) {
+            if ((int)($opt['id'] ?? 0) === $switchEmployeeId) {
+                $matched = $opt;
+                break;
+            }
+        }
+        if ($matched === null) {
+            $qs = $_GET;
+            unset($qs['switch_user'], $qs['switch_user_employee_id'], $qs['switch_user_role']);
+            $qs['error'] = 'Selected user is not assigned to this store.';
+            header('Location: index.php?' . http_build_query($qs));
+            exit;
+        }
+        $switchName = trim((string)($matched['full_name'] ?? ''));
+        if ($switchName === '') {
+            $switchName = 'Store User #' . $switchEmployeeId;
+        }
+        $sourceRole = trim((string)($matched['role_name'] ?? ''));
+        if ($sourceRole !== '') {
+            $switchRole = normalizeUserRole($sourceRole);
+        }
+        $_SESSION['employee_id'] = $switchEmployeeId;
+        $_SESSION['user_employee_id'] = $switchEmployeeId;
+        $_SESSION['user_id'] = 'dev-emp-' . $switchEmployeeId;
+    } else {
+        $switchName = $switchRole === 'admin' ? 'Admin User' : ($switchRole === 'manager' ? 'Manager User' : 'Employee User');
+        unset($_SESSION['employee_id'], $_SESSION['user_employee_id']);
+        $_SESSION['user_id'] = 'dev-role-' . $switchRole;
+    }
+    $_SESSION['user_name'] = $switchName;
+    $_SESSION['user_role'] = $switchRole;
+
+    $qs = $_GET;
+    unset($qs['switch_user'], $qs['switch_user_employee_id'], $qs['switch_user_role']);
+    $qs['success'] = 'Switched to ' . $switchName . ' (' . ucfirst($switchRole) . ')';
+    header('Location: index.php?' . http_build_query($qs));
+    exit;
+}
 if ($kpiMode === 'edit' && !$canWriteKpi) {
     $kpiMode = 'view';
     if (!isset($errorMessage)) {
@@ -146,6 +200,24 @@ if ($kpiMode === 'edit' && !$canWriteKpi) {
 $isKpiEditMode = ($kpiMode === 'edit');
 $isKpiAction = ($action === 'dashboard');
 require_once 'includes/post-handlers.php';
+
+if ($isTimeclockAction && $storeId && isset($_GET['seed_tasks']) && currentUserCan('timeclock_manager')) {
+    $seedResult = seedDemoTimeclockTasksForDate((int)$storeId, (string)$date, (string)$currentUserName);
+    $seedMsg = (string)($seedResult['message'] ?? 'Task seed finished.');
+    $seedQs = [
+        'action' => $action,
+        'store' => (int)$storeId,
+        'date' => (string)$date,
+        'panel' => 'tc_panel_tasks',
+    ];
+    if (!empty($seedResult['success'])) {
+        $seedQs['success'] = $seedMsg;
+    } else {
+        $seedQs['error'] = $seedMsg;
+    }
+    header('Location: index.php?' . http_build_query($seedQs));
+    exit;
+}
 
 if ($isTimeclockAction && $storeId && !empty($_GET['payroll_export_period_id'])) {
     if (!currentUserCan('timeclock_manager')) {
@@ -163,6 +235,75 @@ if ($isTimeclockAction && $storeId && !empty($_GET['payroll_export_period_id']))
     header('Content-Type: text/csv; charset=UTF-8');
     header('Content-Disposition: attachment; filename="timeclock-payroll-period-' . $periodIdExport . '.csv"');
     echo $csv;
+    exit;
+}
+if ($isTimeclockAction && $storeId && isset($_GET['task_export']) && currentUserCan('timeclock_manager')) {
+    $taskRowsCsv = getTimeclockTasksForStoreDate((int)$storeId, (string)$date);
+    $fh = fopen('php://temp', 'w+');
+    fputcsv($fh, ['Employee', 'Task Type', 'Title', 'Status', 'Assigned Date', 'Due Date', 'Completed By', 'Completed At']);
+    foreach ($taskRowsCsv as $tr) {
+        $taskTypeCsv = strtoupper((string)($tr['task_type'] ?? 'DAILY'));
+        $taskStatusCsv = strtoupper((string)($tr['status'] ?? 'OPEN'));
+        $taskTypeLabelCsv = ($taskTypeCsv === 'ONE_OFF') ? 'Special Task' : 'Daily Task';
+        $taskStatusLabelCsv = ($taskStatusCsv === 'DONE') ? 'Completed' : 'To Do';
+        fputcsv($fh, [
+            (string)($tr['assigned_employee_name'] ?? 'Unassigned'),
+            $taskTypeLabelCsv,
+            (string)($tr['title'] ?? ''),
+            $taskStatusLabelCsv,
+            (string)($tr['task_date'] ?? ''),
+            (string)($tr['due_date'] ?? ''),
+            (string)($tr['completed_by'] ?? ''),
+            (string)($tr['completed_at'] ?? ''),
+        ]);
+    }
+    rewind($fh);
+    $csvTasks = stream_get_contents($fh);
+    fclose($fh);
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="timeclock-task-summary-' . preg_replace('/[^0-9\-]/', '', (string)$date) . '.csv"');
+    echo (string)$csvTasks;
+    exit;
+}
+if ($isTimeclockAction && $storeId && isset($_GET['task_export_range']) && currentUserCan('timeclock_manager')) {
+    $rangeStart = trim((string)($_GET['task_start'] ?? $date));
+    $rangeEnd = trim((string)($_GET['task_end'] ?? $date));
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $rangeStart)) {
+        $rangeStart = (string)$date;
+    }
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $rangeEnd)) {
+        $rangeEnd = (string)$date;
+    }
+    if ($rangeStart > $rangeEnd) {
+        $tmp = $rangeStart;
+        $rangeStart = $rangeEnd;
+        $rangeEnd = $tmp;
+    }
+    $taskRowsCsv = getTimeclockTasksForStoreDateRange((int)$storeId, (string)$rangeStart, (string)$rangeEnd);
+    $fh = fopen('php://temp', 'w+');
+    fputcsv($fh, ['Employee', 'Task Type', 'Title', 'Status', 'Assigned Date', 'Due Date', 'Completed By', 'Completed At']);
+    foreach ($taskRowsCsv as $tr) {
+        $taskTypeCsv = strtoupper((string)($tr['task_type'] ?? 'DAILY'));
+        $taskStatusCsv = strtoupper((string)($tr['status'] ?? 'OPEN'));
+        $taskTypeLabelCsv = ($taskTypeCsv === 'ONE_OFF') ? 'Special Task' : 'Daily Task';
+        $taskStatusLabelCsv = ($taskStatusCsv === 'DONE') ? 'Completed' : 'To Do';
+        fputcsv($fh, [
+            (string)($tr['assigned_employee_name'] ?? 'Unassigned'),
+            $taskTypeLabelCsv,
+            (string)($tr['title'] ?? ''),
+            $taskStatusLabelCsv,
+            (string)($tr['task_date'] ?? ''),
+            (string)($tr['due_date'] ?? ''),
+            (string)($tr['completed_by'] ?? ''),
+            (string)($tr['completed_at'] ?? ''),
+        ]);
+    }
+    rewind($fh);
+    $csvTasks = stream_get_contents($fh);
+    fclose($fh);
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="timeclock-task-range-' . preg_replace('/[^0-9\-]/', '', (string)$rangeStart) . '-to-' . preg_replace('/[^0-9\-]/', '', (string)$rangeEnd) . '.csv"');
+    echo (string)$csvTasks;
     exit;
 }
 
@@ -230,10 +371,43 @@ $timeClockPtoSettings = [];
 $timeClockPtoBalances = [];
 $timeClockPendingPtoRequests = [];
 $timeClockRecentPtoRequests = [];
+$timeClockTasksForDate = [];
+$timeClockTaskShiftOptions = [];
+$timeClockTaskSummary = ['open' => 0, 'done' => 0, 'missed' => 0];
+$timeClockTaskEmployeeSummary = [];
+$timeClockTaskTotalCount = 0;
+$timeClockTaskCompletionPct = 0;
+$timeClockTaskReportStart = (string)$date;
+$timeClockTaskReportEnd = (string)$date;
+$timeClockTaskRangeSummary = ['rows' => [], 'totals' => ['total' => 0, 'done' => 0, 'open' => 0, 'overdue' => 0]];
 $timeClockSelectedDateLocked = false;
 $timeClockPendingEditRequestLockMap = [];
 $timeClockPendingPtoRequestLockMap = [];
 $timeClockDefaultPanel = '';
+$isEmployeeSurface = false;
+$isManagerSurface = false;
+$isAdminSurface = false;
+$employeeDashboardSummary = [
+    'next_shift_label' => 'No upcoming shift',
+    'tasks_open' => 0,
+    'tasks_done' => 0,
+    'pto_available_hours' => 0.0,
+    'pto_upcoming_count' => 0,
+    'next_pto_label' => '-',
+    'recent_attendance_alerts' => 0
+];
+$employeeWeekScheduleRows = [];
+$employeeWeekScheduledHours = 0.0;
+$employeeWeekDateCards = [];
+$employeeWeekRangeLabel = 'This week';
+$managerDashboardSummary = [
+    'coverage_gap_days' => 0,
+    'overtime_employees' => 0,
+    'approved_pto_upcoming' => 0,
+    'reviews_due_soon' => 0,
+    'reviews_overdue' => 0,
+    'coaching_notes_open' => 0
+];
 if ($storeId && $isTimeclockAction) {
     if ($timeclockRoleSurface === '') {
         if ($currentUserRole === 'employee') {
@@ -244,13 +418,20 @@ if ($storeId && $isTimeclockAction) {
             $timeclockRoleSurface = 'manager';
         }
     }
-    if ($timeclockRoleSurface === 'employee') {
-        $timeClockDefaultPanel = 'tc_panel_punch';
-    } elseif ($timeclockRoleSurface === 'admin') {
-        $timeClockDefaultPanel = 'tc_panel_settings';
+    if ($action === 'timeclock' || $action === 'schedule_center') {
+        if ($timeclockRoleSurface === 'employee') {
+            $timeClockDefaultPanel = 'tc_panel_punch';
+        } elseif ($timeclockRoleSurface === 'admin') {
+            $timeClockDefaultPanel = 'tc_panel_settings';
+        } else {
+            $timeClockDefaultPanel = 'tc_panel_schedule';
+        }
     } else {
-        $timeClockDefaultPanel = 'tc_panel_schedule';
+        $timeClockDefaultPanel = '';
     }
+    $isEmployeeSurface = ($timeclockRoleSurface === 'employee');
+    $isManagerSurface = ($timeclockRoleSurface === 'manager');
+    $isAdminSurface = ($timeclockRoleSurface === 'admin');
     $timeClockEmployees = getTimeClockEmployeesForStore($storeId);
     $timeClockOpenShifts = getOpenShiftsByStore($storeId);
     $timeClockRecentEvents = getRecentShiftEventsByStore($storeId, 25);
@@ -421,6 +602,63 @@ if ($storeId && $isTimeclockAction) {
     $timeClockPtoBalances = getPtoBalancesByStore($storeId);
     $timeClockPendingPtoRequests = getPendingPtoRequestsByStore($storeId);
     $timeClockRecentPtoRequests = getRecentPtoRequestsByStore($storeId, 30);
+    $timeclockTaskLogicV2Enabled = isTimeclockTaskLogicV2Enabled((int)$storeId);
+    if ($timeclockTaskLogicV2Enabled) {
+        generateTimeclockTasksFromTemplates((int)$storeId, (string)$date, (string)$currentUserName);
+    }
+    $timeClockTasksForDate = getTimeclockTasksForStoreDate((int)$storeId, (string)$date);
+    $timeClockVisibleTasksForEmployee = [];
+    if ($timeclockTaskLogicV2Enabled && $sessionEmployeeIdTc > 0) {
+        $timeClockVisibleTasksForEmployee = getVisibleTasksForEmployeeOnDate((int)$storeId, (int)$sessionEmployeeIdTc, (string)$date);
+    }
+    $timeClockTaskTemplates = $timeclockTaskLogicV2Enabled
+        ? getTimeclockTaskTemplatesForStore((int)$storeId, true)
+        : [];
+    if (empty($timeClockTasksForDate) && currentUserCan('timeclock_manager')) {
+        $autoSeedRes = seedDemoTimeclockTasksForDate((int)$storeId, (string)$date, (string)$currentUserName);
+        if (!empty($autoSeedRes['success'])) {
+            $timeClockTasksForDate = getTimeclockTasksForStoreDate((int)$storeId, (string)$date);
+        }
+    }
+    $todayYmdForTasks = (new DateTime('now', new DateTimeZone(TIMEZONE)))->format('Y-m-d');
+    foreach ($timeClockTasksForDate as $taskRow) {
+        $status = strtoupper((string)($taskRow['status'] ?? 'OPEN'));
+        if ($status === 'DONE') {
+            $timeClockTaskSummary['done']++;
+        } else {
+            $timeClockTaskSummary['open']++;
+            $taskType = strtoupper((string)($taskRow['task_type'] ?? 'DAILY'));
+            $assignedDate = (string)($taskRow['task_date'] ?? '');
+            $dueDate = (string)($taskRow['due_date'] ?? '');
+            $isMissed = ($taskType === 'ONE_OFF')
+                ? ($dueDate !== '' && $dueDate < $todayYmdForTasks)
+                : ($assignedDate !== '' && $assignedDate < $todayYmdForTasks);
+            if ($isMissed) {
+                $timeClockTaskSummary['missed']++;
+            }
+        }
+    }
+    $timeClockTaskTotalCount = (int)$timeClockTaskSummary['open'] + (int)$timeClockTaskSummary['done'];
+    $timeClockTaskCompletionPct = $timeClockTaskTotalCount > 0
+        ? (int)round(((int)$timeClockTaskSummary['done'] / $timeClockTaskTotalCount) * 100)
+        : 0;
+    $timeClockTaskReportStart = trim((string)($_GET['task_start'] ?? ''));
+    $timeClockTaskReportEnd = trim((string)($_GET['task_end'] ?? ''));
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $timeClockTaskReportStart)) {
+        $timeClockTaskReportStart = (new DateTime((string)$date, new DateTimeZone(TIMEZONE)))->modify('-6 days')->format('Y-m-d');
+    }
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $timeClockTaskReportEnd)) {
+        $timeClockTaskReportEnd = (string)$date;
+    }
+    if ($timeClockTaskReportStart > $timeClockTaskReportEnd) {
+        $tmp = $timeClockTaskReportStart;
+        $timeClockTaskReportStart = $timeClockTaskReportEnd;
+        $timeClockTaskReportEnd = $tmp;
+    }
+    $timeClockTaskRangeSummary = getTimeclockTaskSummaryForRange((int)$storeId, (string)$timeClockTaskReportStart, (string)$timeClockTaskReportEnd);
+    $timeClockTaskShiftOptions = array_values(array_filter($timeClockStaffScheduleRows, function ($row) use ($date) {
+        return (string)($row['start_date_ymd'] ?? '') === (string)$date;
+    }));
     foreach ($timeClockPendingPtoRequests as $req) {
         $reqId = (int)($req['id'] ?? 0);
         if ($reqId <= 0) {
@@ -454,6 +692,141 @@ if ($storeId && $isTimeclockAction) {
         }
         $timeClockPendingEditRequestLockMap[$reqId] = $lockStart ? hasLockedPayrollPeriodOverlap($storeId, $lockStart, $lockEnd) : false;
     }
+
+    $todayYmdDashboard = (new DateTime('now', new DateTimeZone(TIMEZONE)))->format('Y-m-d');
+    if ($sessionEmployeeIdTc > 0) {
+        $employeeFutureShifts = array_values(array_filter($timeClockStaffScheduleRows, function ($row) use ($sessionEmployeeIdTc, $todayYmdDashboard) {
+            if ((int)($row['employee_id'] ?? 0) !== (int)$sessionEmployeeIdTc) return false;
+            $shiftYmd = (string)($row['start_date_ymd'] ?? '');
+            return $shiftYmd !== '' && $shiftYmd >= $todayYmdDashboard;
+        }));
+        usort($employeeFutureShifts, function ($a, $b) {
+            return strcmp((string)($a['start_local'] ?? ''), (string)($b['start_local'] ?? ''));
+        });
+        if (!empty($employeeFutureShifts)) {
+            $nextShift = $employeeFutureShifts[0];
+            $employeeDashboardSummary['next_shift_label'] = formatDateForUser((string)($nextShift['start_date_ymd'] ?? '')) . ' ' . ((string)($nextShift['start_time_label'] ?? '')) . ' - ' . ((string)($nextShift['end_time_label'] ?? ''));
+        }
+
+        foreach ($timeClockTasksForDate as $taskRow) {
+            if ($timeclockTaskLogicV2Enabled) {
+                $visibleTaskIds = array_column($timeClockVisibleTasksForEmployee, 'id');
+                if (!in_array((int)($taskRow['id'] ?? 0), array_map('intval', $visibleTaskIds), true)) {
+                    continue;
+                }
+            } else {
+                $assignedEmpId = (int)($taskRow['assigned_employee_id'] ?? 0);
+                if ($assignedEmpId > 0 && $assignedEmpId !== $sessionEmployeeIdTc) continue;
+            }
+            $status = strtoupper((string)($taskRow['status'] ?? 'OPEN'));
+            if ($status === 'DONE') {
+                $employeeDashboardSummary['tasks_done']++;
+            } else {
+                $employeeDashboardSummary['tasks_open']++;
+            }
+        }
+
+        foreach ($timeClockPtoBalances as $balRow) {
+            if ((int)($balRow['employee_id'] ?? 0) !== $sessionEmployeeIdTc) continue;
+            $employeeDashboardSummary['pto_available_hours'] = ((int)($balRow['available_minutes'] ?? 0)) / 60;
+            break;
+        }
+
+        $employeeUpcomingPto = array_values(array_filter($timeClockRecentPtoRequests, function ($req) use ($sessionEmployeeIdTc, $todayYmdDashboard) {
+            if ((int)($req['employee_id'] ?? 0) !== (int)$sessionEmployeeIdTc) return false;
+            if (strtoupper((string)($req['status'] ?? '')) !== 'APPROVED') return false;
+            $start = (string)($req['request_start_date'] ?? '');
+            return $start !== '' && $start >= $todayYmdDashboard;
+        }));
+        $employeeDashboardSummary['pto_upcoming_count'] = count($employeeUpcomingPto);
+        if (!empty($employeeUpcomingPto)) {
+            usort($employeeUpcomingPto, function ($a, $b) {
+                return strcmp((string)($a['request_start_date'] ?? ''), (string)($b['request_start_date'] ?? ''));
+            });
+            $nextPto = $employeeUpcomingPto[0];
+            $employeeDashboardSummary['next_pto_label'] = formatDateForUser((string)($nextPto['request_start_date'] ?? '')) . ' to ' . formatDateForUser((string)($nextPto['request_end_date'] ?? ''));
+        }
+
+        foreach ($timeClockNoShowAlerts as $alertRow) {
+            if ((int)($alertRow['employee_id'] ?? 0) === $sessionEmployeeIdTc) {
+                $employeeDashboardSummary['recent_attendance_alerts']++;
+            }
+        }
+
+        $weekStartYmd = (string)($timeClockScheduleWeekRange['start'] ?? '');
+        $weekEndYmd = (string)($timeClockScheduleWeekRange['end'] ?? '');
+        if ($weekStartYmd !== '' && $weekEndYmd !== '') {
+            $employeeWeekScheduleRows = array_values(array_filter($timeClockStaffScheduleRows, function ($row) use ($sessionEmployeeIdTc, $weekStartYmd, $weekEndYmd) {
+                if ((int)($row['employee_id'] ?? 0) !== (int)$sessionEmployeeIdTc) return false;
+                $shiftYmd = (string)($row['start_date_ymd'] ?? '');
+                return $shiftYmd !== '' && $shiftYmd >= $weekStartYmd && $shiftYmd <= $weekEndYmd;
+            }));
+            usort($employeeWeekScheduleRows, function ($a, $b) {
+                return strcmp((string)($a['start_local'] ?? ''), (string)($b['start_local'] ?? ''));
+            });
+            foreach ($employeeWeekScheduleRows as $row) {
+                $minutes = (int)($row['scheduled_minutes'] ?? 0);
+                if ($minutes > 0) $employeeWeekScheduledHours += ($minutes / 60);
+            }
+
+            $employeeWeekRowsByDate = [];
+            foreach ($employeeWeekScheduleRows as $row) {
+                $shiftYmd = (string)($row['start_date_ymd'] ?? '');
+                if ($shiftYmd === '') continue;
+                if (!isset($employeeWeekRowsByDate[$shiftYmd])) $employeeWeekRowsByDate[$shiftYmd] = [];
+                $employeeWeekRowsByDate[$shiftYmd][] = $row;
+            }
+
+            try {
+                $weekStartDt = new DateTime($weekStartYmd . ' 00:00:00', new DateTimeZone(TIMEZONE));
+                $weekEndDt = new DateTime($weekEndYmd . ' 00:00:00', new DateTimeZone(TIMEZONE));
+                $employeeWeekRangeLabel = 'Week of, ' . $weekStartDt->format('D, M j') . ' - ' . $weekEndDt->format('D, M j');
+                $cursor = clone $weekStartDt;
+                while ($cursor <= $weekEndDt) {
+                    $ymd = $cursor->format('Y-m-d');
+                    $dayRows = $employeeWeekRowsByDate[$ymd] ?? [];
+                    $isWorking = !empty($dayRows);
+                    $roleLabel = 'Off';
+                    $timeLabel = 'No shift scheduled';
+                    if ($isWorking) {
+                        $firstShift = $dayRows[0];
+                        $roleLabel = (string)($firstShift['role_name'] ?? 'Employee');
+                        $timeLabel = trim((string)($firstShift['start_time_label'] ?? '')) . ' - ' . trim((string)($firstShift['end_time_label'] ?? ''));
+                        if (count($dayRows) > 1) {
+                            $timeLabel .= ' (+' . (count($dayRows) - 1) . ' more)';
+                        }
+                    }
+                    $employeeWeekDateCards[] = [
+                        'day_label' => $cursor->format('D, M j'),
+                        'status_label' => $isWorking ? 'WORKING' : 'OFF',
+                        'role_label' => $roleLabel,
+                        'time_label' => $timeLabel,
+                        'is_working' => $isWorking,
+                    ];
+                    $cursor->modify('+1 day');
+                }
+            } catch (Exception $e) {
+                $employeeWeekDateCards = [];
+                $employeeWeekRangeLabel = 'This week';
+            }
+        }
+    }
+
+    foreach (($timeClockScheduleCalendar['coverage_by_day'] ?? []) as $coverage) {
+        if ((int)($coverage['gap_minutes'] ?? 0) > 0) $managerDashboardSummary['coverage_gap_days']++;
+    }
+    foreach (($timeClockScheduleCalendar['employee_hours'] ?? []) as $hoursRow) {
+        if ((float)($hoursRow['overtime_hours'] ?? 0) > 0) $managerDashboardSummary['overtime_employees']++;
+    }
+    foreach ($timeClockRecentPtoRequests as $reqRow) {
+        if (strtoupper((string)($reqRow['status'] ?? '')) === 'APPROVED' && (string)($reqRow['request_start_date'] ?? '') >= $todayYmdDashboard) {
+            $managerDashboardSummary['approved_pto_upcoming']++;
+        }
+    }
+    // Placeholder scheduling for reviews/notes until review engine tables are introduced.
+    $managerDashboardSummary['reviews_due_soon'] = (int)max(0, round(count($timeClockEmployees) * 0.2));
+    $managerDashboardSummary['reviews_overdue'] = (int)max(0, round(count($timeClockEmployees) * 0.05));
+    $managerDashboardSummary['coaching_notes_open'] = (int)max(0, round(count($timeClockNoShowAlerts) / 2));
 }
 // Get date range and KPIs for spreadsheet view
 $dateRange = null;
@@ -495,7 +868,7 @@ if (!isset($datesWithData)) {
 }
 
 // Inventory table can show its own number of days (1-30) without changing the main view
-$inventoryDays = isset($_GET['inventory_days']) ? max(1, min(30, (int)$_GET['inventory_days'])) : null;
+$inventoryDays = isset($_GET['inventory_days']) ? max(1, min(30, (int)$_GET['inventory_days'])) : 2;
 if ($inventoryDays !== null && $storeId && $isKpiAction) {
     $invEndDt = new DateTime($date);
     $invStartDt = clone $invEndDt;
@@ -619,6 +992,10 @@ if ($chartProductId && !empty($chartDateArray)) {
         'unitCost' => $chartProductUnitCost
     ]);
 }
+$headerUserSwitchEmployees = [];
+if ($storeId > 0) {
+    $headerUserSwitchEmployees = getTimeClockEmployeesForStore((int)$storeId);
+}
 include 'includes/header.php';
 ?>
 <div class="message-stack" id="toast-region" aria-live="polite" aria-atomic="true">
@@ -642,15 +1019,8 @@ include 'includes/header.php';
             <p>Run: <code>make seed</code> or set up the database using <code>setup-db.sh</code></p>
         </div>
     <?php else: ?>
-    <?php
-        $isEmployeeSurface = ($timeclockRoleSurface === 'employee');
-        $isManagerSurface = ($timeclockRoleSurface === 'manager');
-        $isAdminSurface = ($timeclockRoleSurface === 'admin');
-    ?>
     <div class="header app-hero">
         <div>
-            <h1><?php echo APP_NAME; ?></h1>
-            <p class="app-hero-subtitle">Performance, inventory, and labor operations in one place.</p>
             <div class="store-info">Store: <strong><?php echo htmlspecialchars($currentStore['name'] ?? 'N/A'); ?></strong></div>
             <div class="store-selector">
                 <?php foreach ($stores as $store): ?>
@@ -675,23 +1045,113 @@ include 'includes/header.php';
                 <label for="entry-date">Reference Date:</label>
                 <input type="date" id="entry-date" value="<?php echo htmlspecialchars($date); ?>">
             </div>
+            <?php if ($dashboardTab === 'inventory'): ?>
+            <div class="inventory-hero-controls">
+                <form method="get" action="index.php" class="inventory-hero-form">
+                    <input type="hidden" name="action" value="dashboard">
+                    <input type="hidden" name="store" value="<?php echo (int)$storeId; ?>">
+                    <input type="hidden" name="date" value="<?php echo htmlspecialchars($date ?? ''); ?>">
+                    <input type="hidden" name="view" value="<?php echo htmlspecialchars($view ?? 'week'); ?>">
+                    <input type="hidden" name="tab" value="inventory">
+                    <input type="hidden" name="mode" value="view">
+                    <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '10'); ?>">
+                    <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
+                    <?php if ($view === 'custom'): ?>
+                    <input type="hidden" name="days" value="<?php echo (int)$customDays; ?>">
+                    <?php endif; ?>
+                    <label for="inventory_days_hero">Days:</label>
+                    <select name="inventory_days" id="inventory_days_hero" onchange="this.form.submit()">
+                        <?php
+                        $effectiveDaysHero = ($inventoryDays !== null) ? $inventoryDays : (($view === 'custom') ? (int)$customDays : (($view === 'month') ? 30 : 7));
+                        $effectiveDaysHero = max(1, min(30, $effectiveDaysHero));
+                        for ($d = 1; $d <= 30; $d++):
+                        ?>
+                        <option value="<?php echo $d; ?>" <?php echo $effectiveDaysHero === $d ? ' selected' : ''; ?>><?php echo $d; ?></option>
+                        <?php endfor; ?>
+                    </select>
+                </form>
+                <form method="get" action="index.php" class="inventory-hero-form">
+                    <input type="hidden" name="action" value="dashboard">
+                    <input type="hidden" name="store" value="<?php echo (int)$storeId; ?>">
+                    <input type="hidden" name="date" value="<?php echo htmlspecialchars($date ?? ''); ?>">
+                    <input type="hidden" name="view" value="<?php echo htmlspecialchars($view ?? 'week'); ?>">
+                    <input type="hidden" name="tab" value="inventory">
+                    <input type="hidden" name="mode" value="view">
+                    <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
+                    <?php if ($view === 'custom'): ?>
+                    <input type="hidden" name="days" value="<?php echo (int)$customDays; ?>">
+                    <?php endif; ?>
+                    <?php if ($inventoryDays !== null): ?>
+                    <input type="hidden" name="inventory_days" value="<?php echo (int)$inventoryDays; ?>">
+                    <?php endif; ?>
+                    <label for="inventory_limit_hero">Show:</label>
+                    <select name="inventory_limit" id="inventory_limit_hero" onchange="this.form.submit()">
+                        <option value="10" <?php echo $inventoryLimit === '10' ? ' selected' : ''; ?>>Top 10</option>
+                        <option value="15" <?php echo $inventoryLimit === '15' ? ' selected' : ''; ?>>Top 15</option>
+                        <option value="20" <?php echo $inventoryLimit === '20' ? ' selected' : ''; ?>>Top 20</option>
+                        <option value="all" <?php echo $inventoryLimit === 'all' ? ' selected' : ''; ?>>All</option>
+                    </select>
+                </form>
+                <button type="button" class="btn btn-primary inventory-hero-btn" onclick="openOrderModal()" title="Create a new order (choose product and vendor)">+ Add Order</button>
+                <button type="button" class="btn btn-primary inventory-hero-btn" onclick="showProductModal()">+ Add Product</button>
+                <button type="button" class="btn btn-primary inventory-hero-btn" onclick="showVendorModal()">+ Add Vendor</button>
+                <?php if ($canWriteInventory && !empty($vendors)): ?>
+                <?php
+                $vendorsSorted = $vendors;
+                usort($vendorsSorted, function ($a, $b) { return strcasecmp($a['name'] ?? '', $b['name'] ?? ''); });
+                ?>
+                <div class="vendor-edit-dropdown inventory-hero-vendor-edit">
+                    <div class="vendor-edit-label">Edit Vendor</div>
+                    <button type="button" class="btn btn-vendor-edit" onclick="toggleVendorEditDropdown()" title="Choose a vendor to edit">Choose vendor <span class="dropdown-arrow">▼</span></button>
+                    <div id="vendor-edit-dropdown-menu" class="vendor-edit-dropdown-menu" role="listbox">
+                        <?php foreach ($vendorsSorted as $v): ?>
+                        <button type="button" class="vendor-edit-dropdown-item" role="option" onclick="selectVendorToEdit(<?php echo (int)$v['id']; ?>)" title="Edit <?php echo htmlspecialchars($v['name']); ?>"><?php echo htmlspecialchars($v['name']); ?></button>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+                <?php endif; ?>
+            </div>
+            <?php endif; ?>
         </div>
     </div>
     <?php if ($dashboardTab === 'kpi'): ?>
-    <div class="dashboard-subnav" style="margin-top: -6px;">
-        <a href="?action=dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode($date); ?>&view=<?php echo urlencode($view); ?><?php echo $view === 'custom' ? '&days=' . (int)$customDays : ''; ?>&inventory_limit=<?php echo urlencode($inventoryLimit ?? '10'); ?>&inventory_sort=<?php echo urlencode($inventorySort ?? 'status'); ?><?php echo $inventoryDays !== null ? '&inventory_days=' . (int)$inventoryDays : ''; ?>&tab=kpi&mode=view" class="dashboard-subnav-tab <?php echo !$isKpiEditMode ? 'active' : ''; ?>">
-            View Mode
-        </a>
-        <?php if ($canWriteKpi): ?>
-        <a href="?action=dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode($date); ?>&view=<?php echo urlencode($view); ?><?php echo $view === 'custom' ? '&days=' . (int)$customDays : ''; ?>&inventory_limit=<?php echo urlencode($inventoryLimit ?? '10'); ?>&inventory_sort=<?php echo urlencode($inventorySort ?? 'status'); ?><?php echo $inventoryDays !== null ? '&inventory_days=' . (int)$inventoryDays : ''; ?>&tab=kpi&mode=edit" class="dashboard-subnav-tab <?php echo $isKpiEditMode ? 'active' : ''; ?>">
-            Edit Mode
-        </a>
-        <?php else: ?>
-        <span class="dashboard-subnav-tab" aria-disabled="true" title="Manager role required">Edit Mode (Manager)</span>
-        <?php endif; ?>
+    <?php
+        $todayYmd = (new DateTime('now', new DateTimeZone(TIMEZONE)))->format('Y-m-d');
+        $summaryDate = in_array((string)$date, $dateArray, true) ? (string)$date : (!empty($dateArray) ? (string)end($dateArray) : (string)$date);
+        $summaryKpi = $kpiMap[$summaryDate] ?? [];
+        $summarySales = (float)($summaryKpi['sales_today'] ?? 0);
+        $summaryCogs = (float)($summaryKpi['cogs_today'] ?? 0);
+        $summaryLabor = (float)($summaryKpi['labor_today'] ?? 0);
+        $summaryOverhead = (float)($summaryKpi['avg_daily_overhead'] ?? 0);
+        $summaryProfit = calculateProfit($summarySales, $summaryCogs, $summaryLabor, $summaryOverhead);
+        $summaryLaborPct = $summarySales > 0 ? calculateLaborPercentage($summaryLabor, $summarySales) : 0;
+    ?>
+    <div class="kpi-summary-strip" aria-label="KPI quick summary">
+        <div class="kpi-summary-chip">
+            <span class="kpi-summary-label">Summary Date</span>
+            <span class="kpi-summary-value"><?php echo htmlspecialchars(formatDateForUser($summaryDate)); ?></span>
+        </div>
+        <div class="kpi-summary-chip">
+            <span class="kpi-summary-label">Sales</span>
+            <span class="kpi-summary-value"><?php echo htmlspecialchars(formatCurrency($summarySales)); ?></span>
+        </div>
+        <div class="kpi-summary-chip">
+            <span class="kpi-summary-label">COGS</span>
+            <span class="kpi-summary-value"><?php echo htmlspecialchars(formatCurrency($summaryCogs)); ?></span>
+        </div>
+        <div class="kpi-summary-chip">
+            <span class="kpi-summary-label">Labor</span>
+            <span class="kpi-summary-value"><?php echo htmlspecialchars(formatCurrency($summaryLabor)); ?></span>
+        </div>
+        <div class="kpi-summary-chip <?php echo $summaryProfit < 0 ? 'is-negative' : ''; ?>">
+            <span class="kpi-summary-label">Profit</span>
+            <span class="kpi-summary-value"><?php echo htmlspecialchars(formatCurrency($summaryProfit)); ?></span>
+        </div>
+        <div class="kpi-summary-chip">
+            <span class="kpi-summary-label">Labor %</span>
+            <span class="kpi-summary-value"><?php echo htmlspecialchars(formatPercentage($summaryLaborPct)); ?></span>
+        </div>
     </div>
-    <?php endif; ?>
-    <?php if ($dashboardTab === 'kpi'): ?>
     <form method="POST" action="" id="spreadsheet-form">
         <input type="hidden" name="store_id" value="<?php echo $storeId; ?>">
         <input type="hidden" name="view" value="<?php echo $view; ?>">
@@ -701,6 +1161,9 @@ include 'includes/header.php';
         <input type="hidden" name="inventory_days" value="<?php echo (int)$effectiveInventoryDays; ?>">
         <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
         <input type="hidden" name="bulk_save" value="1">
+        <?php if ($isKpiEditMode): ?>
+        <div id="kpi_inline_savebar" class="kpi-inline-savebar" data-save-state="saved">All changes saved</div>
+        <?php endif; ?>
         <div class="spreadsheet-container">
             <div class="spreadsheet-wrapper">
                 <table class="spreadsheet-table">
@@ -712,8 +1175,14 @@ include 'includes/header.php';
                                 $dayName = $dateObj->format('D');
                                 $dayNum = $dateObj->format('j');
                                 $month = $dateObj->format('M');
+                                $dayNumIso = (int)$dateObj->format('N');
+                                $isWeekendCol = $dayNumIso >= 6;
+                                $isTodayCol = $d === $todayYmd;
+                                $dateClasses = 'date-col';
+                                if ($isWeekendCol) $dateClasses .= ' is-weekend';
+                                if ($isTodayCol) $dateClasses .= ' is-today';
                             ?>
-                                <th class="date-col">
+                                <th class="<?php echo htmlspecialchars($dateClasses); ?>">
                                     <div class="date-header">
                                         <div class="date-day"><?php echo $dayName; ?></div>
                                         <div class="date-number"><?php echo $dayNum; ?></div>
@@ -738,17 +1207,26 @@ include 'includes/header.php';
                             'profit' => 'Profit',
                             'labor_percentage' => 'Labor %'
                         ];
+                        $metricRowIndex = 0;
                         ?>
                         <?php foreach ($metrics as $key => $label): ?>
                             <tr>
                                 <td class="frozen-label-col metric-label">
                                     <div class="label-text"><?php echo htmlspecialchars($label); ?></div>
+                                    <?php if ($isKpiEditMode): ?>
+                                    <span class="kpi-row-save-status" data-row-save-status="<?php echo (int)$metricRowIndex; ?>">Saved</span>
+                                    <?php endif; ?>
                                 </td>
-                                <?php foreach ($dateArray as $d): 
+                                <?php foreach ($dateArray as $colIndex => $d): 
                                     $kpi = $kpiMap[$d] ?? null;
                                     $value = $kpi ? ($kpi[$key] ?? 0) : 0;
+                                    $cellClasses = 'data-cell';
+                                    $dateObjCell = new DateTime($d);
+                                    $dayNumIsoCell = (int)$dateObjCell->format('N');
+                                    if ($dayNumIsoCell >= 6) $cellClasses .= ' is-weekend';
+                                    if ($d === $todayYmd) $cellClasses .= ' is-today';
                                 ?>
-                                    <td class="data-cell">
+                                    <td class="<?php echo htmlspecialchars($cellClasses); ?>">
                                         <input type="number" 
                                                name="<?php echo $key; ?>[<?php echo $d; ?>]" 
                                                value="<?php echo htmlspecialchars($value); ?>" 
@@ -756,10 +1234,13 @@ include 'includes/header.php';
                                                class="spreadsheet-input"
                                                data-date="<?php echo $d; ?>"
                                                data-metric="<?php echo $key; ?>"
+                                               data-row="<?php echo (int)$metricRowIndex; ?>"
+                                               data-col="<?php echo (int)$colIndex; ?>"
                                                <?php echo !$isKpiEditMode ? 'readonly' : ''; ?>>
                                     </td>
                                 <?php endforeach; ?>
                             </tr>
+                            <?php $metricRowIndex++; ?>
                         <?php endforeach; ?>
                         <?php foreach ($computedMetrics as $key => $label): ?>
                             <tr class="computed-row">
@@ -786,8 +1267,13 @@ include 'includes/header.php';
                                         $value = calculateProfit($sales, $cogs, $labor, $overhead);
                                         $displayValue = formatCurrency($value);
                                     }
+                                    $computedCellClasses = 'data-cell computed-cell';
+                                    $dateObjComputed = new DateTime($d);
+                                    $dayNumIsoComputed = (int)$dateObjComputed->format('N');
+                                    if ($dayNumIsoComputed >= 6) $computedCellClasses .= ' is-weekend';
+                                    if ($d === $todayYmd) $computedCellClasses .= ' is-today';
                                 ?>
-                                    <td class="data-cell computed-cell" data-date="<?php echo $d; ?>" data-metric="<?php echo $key; ?>">
+                                    <td class="<?php echo htmlspecialchars($computedCellClasses); ?>" data-date="<?php echo $d; ?>" data-metric="<?php echo $key; ?>">
                                         <div class="computed-value <?php echo ($key === 'profit' && $value < 0) ? 'negative' : ''; ?>">
                                             <?php echo $displayValue; ?>
                                         </div>
@@ -885,71 +1371,6 @@ include 'includes/header.php';
                     <span id="inventory-toggle-icon">▼</span> Inventory Management
                 </button>
             </h2>
-            <div class="inventory-actions">
-                <form method="get" action="index.php" id="inventory-days-form" style="display: inline;">
-                    <input type="hidden" name="action" value="<?php echo htmlspecialchars($action); ?>">
-                    <input type="hidden" name="store" value="<?php echo (int)$storeId; ?>">
-                    <input type="hidden" name="date" value="<?php echo htmlspecialchars($date ?? ''); ?>">
-                    <input type="hidden" name="view" value="<?php echo htmlspecialchars($view ?? 'week'); ?>">
-                    <input type="hidden" name="tab" value="<?php echo htmlspecialchars($dashboardTab); ?>">
-                    <?php if ($view === 'custom'): ?>
-                    <input type="hidden" name="days" value="<?php echo (int)$customDays; ?>">
-                    <?php endif; ?>
-                    <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '10'); ?>">
-                    <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
-                    <label for="inventory_days_select" style="font-size: 13px; color: #000; margin-right: 6px;">Days:</label>
-                    <select name="inventory_days" id="inventory_days_select" class="inventory-days-select" onchange="this.form.submit()" title="Number of days shown in this table only (does not change the KPI view above)">
-                        <?php
-                        $effectiveDays = ($inventoryDays !== null) ? $inventoryDays : (($view === 'custom') ? (int)$customDays : (($view === 'month') ? 30 : 7));
-                        $effectiveDays = max(1, min(30, $effectiveDays));
-                        for ($d = 1; $d <= 30; $d++):
-                        ?>
-                        <option value="<?php echo $d; ?>" <?php echo $effectiveDays === $d ? ' selected' : ''; ?>><?php echo $d; ?></option>
-                        <?php endfor; ?>
-                    </select>
-                </form>
-                <span style="margin-left: 8px;"></span>
-                <form method="get" action="index.php" id="inventory-limit-form" style="display: inline;">
-                    <input type="hidden" name="action" value="<?php echo htmlspecialchars($action); ?>">
-                    <input type="hidden" name="store" value="<?php echo (int)$storeId; ?>">
-                    <input type="hidden" name="date" value="<?php echo htmlspecialchars($date ?? ''); ?>">
-                    <input type="hidden" name="view" value="<?php echo htmlspecialchars($view ?? 'week'); ?>">
-                    <input type="hidden" name="tab" value="<?php echo htmlspecialchars($dashboardTab); ?>">
-                    <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
-                    <?php if ($view === 'custom'): ?>
-                    <input type="hidden" name="days" value="<?php echo (int)$customDays; ?>">
-                    <?php endif; ?>
-                    <?php if ($inventoryDays !== null): ?>
-                    <input type="hidden" name="inventory_days" value="<?php echo (int)$inventoryDays; ?>">
-                    <?php endif; ?>
-                    <label for="inventory_limit_select" style="font-size: 13px; color: #000; margin-right: 6px;">Show:</label>
-                    <select name="inventory_limit" id="inventory_limit_select" class="inventory-limit-select" onchange="this.form.submit()" style="color: #000; background: #fff; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
-                        <option value="10" <?php echo $inventoryLimit === '10' ? ' selected' : ''; ?>>Top 10</option>
-                        <option value="15" <?php echo $inventoryLimit === '15' ? ' selected' : ''; ?>>Top 15</option>
-                        <option value="20" <?php echo $inventoryLimit === '20' ? ' selected' : ''; ?>>Top 20</option>
-                        <option value="all" <?php echo $inventoryLimit === 'all' ? ' selected' : ''; ?>>All</option>
-                    </select>
-                </form>
-                <span style="margin-left: 12px;"></span>
-                <button type="button" class="btn btn-primary" onclick="openOrderModal()" title="Create a new order (choose product and vendor)">+ Add Order</button>
-                <button type="button" class="btn btn-primary" onclick="showProductModal()">+ Add Product</button>
-                <button type="button" class="btn btn-primary" onclick="showVendorModal()">+ Add Vendor</button>
-                <?php if ($canWriteInventory && !empty($vendors)): ?>
-                <?php
-                $vendorsSorted = $vendors;
-                usort($vendorsSorted, function ($a, $b) { return strcasecmp($a['name'] ?? '', $b['name'] ?? ''); });
-                ?>
-                <div class="vendor-edit-dropdown">
-                    <div class="vendor-edit-label">Edit existing vendor</div>
-                    <button type="button" class="btn btn-vendor-edit" onclick="toggleVendorEditDropdown()" title="Choose a vendor to edit">Choose vendor to edit <span class="dropdown-arrow">▼</span></button>
-                    <div id="vendor-edit-dropdown-menu" class="vendor-edit-dropdown-menu" role="listbox">
-                        <?php foreach ($vendorsSorted as $v): ?>
-                        <button type="button" class="vendor-edit-dropdown-item" role="option" onclick="selectVendorToEdit(<?php echo (int)$v['id']; ?>)" title="Edit <?php echo htmlspecialchars($v['name']); ?>"><?php echo htmlspecialchars($v['name']); ?></button>
-                        <?php endforeach; ?>
-                    </div>
-                </div>
-                <?php endif; ?>
-            </div>
         </div>
         <div id="inventory-content" class="inventory-content">
             <?php include 'includes/inventory-section.php'; ?>
@@ -1003,9 +1424,44 @@ include 'includes/header.php';
     
     <?php endif; // end storeId/empty stores check (closes line 115) ?>
 <?php elseif ($isTimeclockAction): ?>
+    <?php
+    $requestedPanel = (string)($_GET['panel'] ?? '');
+    $resolvedPanel = $requestedPanel;
+    if ($resolvedPanel === '' && !$isKioskMode) {
+        $resolvedPanel = (string)$timeClockDefaultPanel;
+    }
+    $inlinePanelEligibleActions = ['employee_dashboard', 'manager_dashboard', 'admin_dashboard'];
+    $inlinePanelByRequest = in_array($action, $inlinePanelEligibleActions, true)
+        ? [
+            'tc_panel_staff_schedule' => $requestedPanel === 'tc_panel_staff_schedule',
+            'tc_panel_tasks' => $requestedPanel === 'tc_panel_tasks',
+            'tc_panel_pto' => $requestedPanel === 'tc_panel_pto',
+            'tc_panel_punch' => $requestedPanel === 'tc_panel_punch',
+            'tc_panel_requests' => $requestedPanel === 'tc_panel_requests',
+            'tc_panel_reminders' => $requestedPanel === 'tc_panel_reminders',
+            'tc_panel_payroll' => $requestedPanel === 'tc_panel_payroll',
+            'tc_panel_settings' => $requestedPanel === 'tc_panel_settings',
+            'tc_panel_live' => $requestedPanel === 'tc_panel_live',
+            'tc_panel_admin' => $requestedPanel === 'tc_panel_admin',
+            'tc_panel_mgr_reviews' => $requestedPanel === 'tc_panel_mgr_reviews',
+            'tc_panel_mgr_notes' => $requestedPanel === 'tc_panel_mgr_notes',
+        ]
+        : [];
+    $showIntegratedSchedulePanel = ($action === 'schedule_center');
+    ?>
     <textarea id="tc_staff_schedule_data" hidden><?php echo htmlspecialchars(json_encode($timeClockStaffScheduleRows)); ?></textarea>
     <textarea id="tc_staff_pto_data" hidden><?php echo htmlspecialchars(json_encode($timeClockCalendarPtoRows)); ?></textarea>
     <textarea id="tc_staff_worked_data" hidden><?php echo htmlspecialchars(json_encode($timeClockCalendarWorkedRows)); ?></textarea>
+    <textarea id="tc_open_shift_data" hidden><?php
+        $openShiftLite = array_map(function ($row) {
+            return [
+                'employee_id' => (int)($row['employee_id'] ?? 0),
+                'employee_name' => (string)($row['full_name'] ?? ''),
+                'clock_in_local' => formatUtcTimestampForDisplay($row['clock_in_utc'] ?? null),
+            ];
+        }, $timeClockOpenShifts);
+        echo htmlspecialchars(json_encode($openShiftLite), ENT_QUOTES, 'UTF-8');
+    ?></textarea>
     <input type="hidden" id="tc_staff_calendar_today" value="<?php echo htmlspecialchars((new DateTime('now', new DateTimeZone(TIMEZONE)))->format('Y-m-d')); ?>">
     <input type="hidden" id="tc_staff_calendar_anchor" value="<?php echo htmlspecialchars($date); ?>">
     <?php if ($isKioskMode): ?>
@@ -1033,7 +1489,7 @@ include 'includes/header.php';
             <h2>Punch In/Out</h2>
             <?php if ($timeClockSelectedDateLocked): ?>
                 <div class="timeclock-lock-notice">
-                    Selected date <strong><?php echo htmlspecialchars($date); ?></strong> is inside a locked payroll period. Punches are blocked until unlocked.
+                    Selected date <strong><?php echo htmlspecialchars(formatDateForUser($date)); ?></strong> is inside a locked payroll period. Punches are blocked until unlocked.
                 </div>
             <?php endif; ?>
             <form method="POST" action="" id="timeclock-punch-form" class="kiosk-punch-form" data-kiosk-idle-seconds="<?php echo (int)($timeClockGeoSettings['kiosk_idle_seconds'] ?? 75); ?>">
@@ -1114,14 +1570,38 @@ include 'includes/header.php';
         </div>
     </div>
     <?php else: ?>
+    <?php
+        $timeclockHeroTitle = 'Time Clock';
+        $timeclockHeroSubtitle = 'Scheduling, payroll integrity, and manager approvals.';
+        $timeclockSurfaceBadge = 'Core';
+        if ($isEmployeeSurface) {
+            $timeclockHeroTitle = 'Employee Dashboard';
+            $timeclockHeroSubtitle = 'Fast self-service for punch, schedule, tasks, and requests.';
+            $timeclockSurfaceBadge = 'Employee';
+        } elseif ($isManagerSurface) {
+            $timeclockHeroTitle = 'Manager Operations';
+            $timeclockHeroSubtitle = 'Daily staffing, approvals, and live floor visibility.';
+            $timeclockSurfaceBadge = 'Manager';
+        } elseif ($isAdminSurface) {
+            $timeclockHeroTitle = 'Admin Time Clock';
+            $timeclockHeroSubtitle = 'Policy controls, payroll controls, and governance settings.';
+            $timeclockSurfaceBadge = 'Admin';
+        }
+        if ($isScheduleCenterPage) {
+            $timeclockHeroTitle = 'Schedule Builder';
+            $timeclockHeroSubtitle = 'Dedicated scheduling workspace without the manager dashboard scroll.';
+            $timeclockSurfaceBadge = 'Manager';
+        }
+    ?>
     <div class="header app-hero">
         <div>
-            <h1>Time Clock</h1>
-            <p class="app-hero-subtitle">Scheduling, payroll integrity, and manager approvals.</p>
+            <h1><?php echo htmlspecialchars($timeclockHeroTitle); ?></h1>
+            <p class="app-hero-subtitle"><?php echo htmlspecialchars($timeclockHeroSubtitle); ?></p>
+            <div class="timeclock-surface-badge"><?php echo htmlspecialchars($timeclockSurfaceBadge); ?> Surface</div>
             <div class="store-info">Store: <strong><?php echo htmlspecialchars($currentStore['name'] ?? 'N/A'); ?></strong></div>
             <div class="store-selector">
                 <?php foreach ($stores as $store): ?>
-                    <a href="?action=timeclock&store=<?php echo (int)$store['id']; ?>&date=<?php echo urlencode($date); ?>" class="store-pill <?php echo ($store['id'] == $storeId) ? 'active' : ''; ?>">
+                    <a href="?action=<?php echo $isScheduleCenterPage ? 'schedule_center' : 'timeclock'; ?>&store=<?php echo (int)$store['id']; ?>&date=<?php echo urlencode($date); ?>" class="store-pill <?php echo ($store['id'] == $storeId) ? 'active' : ''; ?>">
                         <?php echo htmlspecialchars($store['name']); ?>
                     </a>
                 <?php endforeach; ?>
@@ -1132,40 +1612,96 @@ include 'includes/header.php';
                 <label for="entry-date">Date:</label>
                 <input type="date" id="entry-date" value="<?php echo htmlspecialchars($date); ?>">
             </div>
+            <?php if (!$isEmployeeSurface): ?>
             <a class="btn" href="?action=timeclock&kiosk=1&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode($date); ?>">Open Kiosk Mode</a>
+            <?php endif; ?>
         </div>
     </div>
 
-    <div class="timeclock-lock-legend">
+    <div class="timeclock-lock-legend<?php echo $isEmployeeSurface ? ' is-compact' : ''; ?>">
         <div class="timeclock-lock-legend-row">
             <span class="<?php echo $timeClockSelectedDateLocked ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">
-                Selected date <?php echo htmlspecialchars($date); ?>: <?php echo $timeClockSelectedDateLocked ? 'LOCKED' : 'OPEN'; ?>
+                Selected date <?php echo htmlspecialchars(formatDateForUser($date)); ?>: <?php echo $timeClockSelectedDateLocked ? 'LOCKED' : 'OPEN'; ?>
             </span>
             <span class="timeclock-badge-warning">Disabled buttons = action blocked by locked payroll period</span>
         </div>
         <div class="timeclock-lock-legend-help">
-            Approve actions are disabled only for overlapping requests. Deny remains available.
+            <?php echo $isEmployeeSurface ? 'Locked payroll dates block punch actions and edits.' : 'Approve actions are disabled only for overlapping requests. Deny remains available.'; ?>
         </div>
     </div>
 
+    <?php if (!$isScheduleCenterPage && $requestedPanel === ''): ?>
     <?php if ($isEmployeeSurface): ?>
-    <?php if (!$isEmployeeSurface): ?>
-    <div class="timeclock-launcher-card">
-        <h2>Employee Dashboard</h2>
-        <p class="timeclock-mobile-help">Minimal-click self-service: punch, schedule, tasks, and requests.</p>
-        <div class="timeclock-quick-actions">
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_punch">Punch In/Out</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_staff_schedule">My Schedule</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_tasks">My Tasks</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_requests">Request Punch Edit</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_pto">Request PTO</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_reminders">My Alerts</button>
+    <div class="timeclock-launcher-card" id="emp_overview_card">
+        <h2>Employee Overview</h2>
+        <p class="timeclock-mobile-help">Read-only snapshot of your most important information.</p>
+        <div class="timeclock-hub-stats">
+            <span class="timeclock-badge-ok">Next shift: <?php echo htmlspecialchars((string)$employeeDashboardSummary['next_shift_label']); ?></span>
+            <span class="<?php echo (int)$employeeDashboardSummary['tasks_open'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">
+                Tasks today: <?php echo (int)$employeeDashboardSummary['tasks_done']; ?> done / <?php echo (int)$employeeDashboardSummary['tasks_open']; ?> open
+            </span>
+            <span class="timeclock-badge-ok">PTO available: <?php echo number_format((float)$employeeDashboardSummary['pto_available_hours'], 2); ?> h</span>
+            <span class="<?php echo (int)$employeeDashboardSummary['pto_upcoming_count'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">
+                Upcoming PTO: <?php echo (int)$employeeDashboardSummary['pto_upcoming_count']; ?>
+            </span>
+            <span class="<?php echo (int)$employeeDashboardSummary['recent_attendance_alerts'] > 0 ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">
+                Attendance flags: <?php echo (int)$employeeDashboardSummary['recent_attendance_alerts']; ?>
+            </span>
+        </div>
+    </div>
+    <div class="timeclock-launcher-card" id="emp_schedule_card">
+        <h3>Schedule</h3>
+        <p class="timeclock-mobile-help">Next PTO block: <strong><?php echo htmlspecialchars((string)$employeeDashboardSummary['next_pto_label']); ?></strong></p>
+        <?php if (!empty($employeeWeekDateCards)): ?>
+        <div class="timeclock-hub-stats">
+            <span class="timeclock-badge-ok">This week shifts: <?php echo (int)count($employeeWeekScheduleRows); ?></span>
+            <span class="timeclock-badge-ok">Scheduled hours: <?php echo number_format((float)$employeeWeekScheduledHours, 2); ?> h</span>
+        </div>
+        <div class="employee-week-strip" aria-label="This week schedule">
+            <div class="employee-week-strip-title"><?php echo htmlspecialchars((string)$employeeWeekRangeLabel); ?></div>
+            <div class="employee-week-strip-grid">
+            <?php foreach ($employeeWeekDateCards as $weekCard): ?>
+            <div class="employee-week-day-card<?php echo !empty($weekCard['is_working']) ? ' is-working' : ' is-off'; ?>">
+                <div class="employee-week-day-card-head">
+                    <span class="employee-week-day-card-date"><?php echo htmlspecialchars((string)($weekCard['day_label'] ?? '')); ?></span>
+                    <span class="employee-week-day-card-status"><?php echo htmlspecialchars((string)($weekCard['status_label'] ?? 'OFF')); ?></span>
+                </div>
+                <div class="employee-week-day-card-body">
+                    <div class="employee-week-day-card-role"><?php echo htmlspecialchars((string)($weekCard['role_label'] ?? '')); ?></div>
+                    <div class="employee-week-day-card-time"><?php echo htmlspecialchars((string)($weekCard['time_label'] ?? '')); ?></div>
+                </div>
+            </div>
+            <?php endforeach; ?>
+            </div>
+        </div>
+        <?php else: ?>
+        <p class="timeclock-mobile-help">No shifts scheduled for this week.</p>
+        <?php endif; ?>
+        <div class="timeclock-quick-actions timeclock-quick-actions-employee">
+            <a class="timeclock-quick-btn is-primary" data-nav-help="See your weekly and monthly schedule." href="?action=employee_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_staff_schedule">Open My Schedule</a>
+        </div>
+    </div>
+    <div class="timeclock-launcher-card" id="emp_tasks_card">
+        <h3>Tasks</h3>
+        <p class="timeclock-mobile-help">Track assigned daily tasks and completion status.</p>
+        <div class="timeclock-quick-actions timeclock-quick-actions-employee">
+            <a class="timeclock-quick-btn" data-nav-help="View assigned tasks and mark completion." href="?action=employee_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_tasks">Open My Tasks</a>
+        </div>
+    </div>
+    <div class="timeclock-launcher-card" id="emp_pto_card">
+        <h3>PTO & Requests</h3>
+        <p class="timeclock-mobile-help">Submit changes through dedicated workflows.</p>
+        <div class="timeclock-quick-actions timeclock-quick-actions-employee">
+            <a class="timeclock-quick-btn is-primary" data-nav-help="Clock in or out using your employee PIN." href="?action=employee_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_punch">Punch In/Out</a>
+            <a class="timeclock-quick-btn" data-nav-help="Request corrections for missed or incorrect punches." href="?action=employee_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_requests">Request Punch Edit</a>
+            <a class="timeclock-quick-btn" data-nav-help="Submit PTO and leave requests." href="?action=employee_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_pto">Request PTO</a>
+            <a class="timeclock-quick-btn" data-nav-help="Review reminders and alert messages." href="?action=employee_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_reminders">My Alerts</a>
         </div>
     </div>
     <?php elseif ($isManagerSurface): ?>
-    <div class="timeclock-launcher-card">
-        <h2>Manager Operations Dashboard</h2>
-        <p class="timeclock-mobile-help">Daily operations, scheduling, approvals, and exceptions in focused groups.</p>
+    <div class="timeclock-launcher-card" id="mgr_overview_card">
+        <h2>Manager Overview</h2>
+        <p class="timeclock-mobile-help">Read-only operational snapshot with links to workflow pages.</p>
         <div class="timeclock-hub-stats">
             <span class="timeclock-badge-ok">Open shifts: <?php echo (int)count($timeClockOpenShifts); ?></span>
             <span class="timeclock-badge-warning">Pending punch edits: <?php echo (int)count($timeClockPendingEditRequests); ?></span>
@@ -1173,13 +1709,65 @@ include 'includes/header.php';
             <span class="<?php echo !empty($timeClockNoShowAlerts) ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">
                 Missed clock-ins: <?php echo (int)count($timeClockNoShowAlerts); ?>
             </span>
+            <span class="<?php echo $timeClockTaskCompletionPct >= 80 ? 'timeclock-badge-ok' : ($timeClockTaskCompletionPct >= 50 ? 'timeclock-badge-warning' : 'timeclock-badge-danger'); ?>">
+                Task completion: <?php echo (int)$timeClockTaskCompletionPct; ?>% (<?php echo (int)$timeClockTaskSummary['done']; ?>/<?php echo (int)$timeClockTaskTotalCount; ?>)
+            </span>
+            <span class="<?php echo (int)$managerDashboardSummary['coverage_gap_days'] > 0 ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">
+                Coverage gaps: <?php echo (int)$managerDashboardSummary['coverage_gap_days']; ?> day(s)
+            </span>
+        </div>
+    </div>
+    <div class="timeclock-launcher-card" id="mgr_schedule_card">
+        <h3>Schedule</h3>
+        <p class="timeclock-mobile-help">Week status: <strong><?php echo htmlspecialchars((string)($timeClockScheduleWeekStatus['status'] ?? 'DRAFT')); ?></strong></p>
+        <div class="timeclock-hub-stats">
+            <span class="<?php echo (int)$managerDashboardSummary['overtime_employees'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">
+                OT risk employees: <?php echo (int)$managerDashboardSummary['overtime_employees']; ?>
+            </span>
+            <span class="<?php echo (int)$managerDashboardSummary['approved_pto_upcoming'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">
+                Approved PTO upcoming: <?php echo (int)$managerDashboardSummary['approved_pto_upcoming']; ?>
+            </span>
         </div>
         <div class="timeclock-quick-actions">
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_schedule">Schedule Editor</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_tasks">Team Tasks</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_admin">Approvals</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_live">Live Floor</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_reminders">Alerts</button>
+            <a class="timeclock-quick-btn is-primary" href="?action=schedule_center&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>">Open Schedule Builder</a>
+        </div>
+    </div>
+    <div class="timeclock-launcher-card" id="mgr_tasks_card">
+        <h3>Tasks</h3>
+        <p class="timeclock-mobile-help">Team completion and follow-up links.</p>
+        <div class="timeclock-hub-stats">
+            <span class="<?php echo (int)($timeClockTaskSummary['open'] ?? 0) > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">Open: <?php echo (int)($timeClockTaskSummary['open'] ?? 0); ?></span>
+            <span class="timeclock-badge-ok">Done: <?php echo (int)($timeClockTaskSummary['done'] ?? 0); ?></span>
+            <span class="<?php echo (int)($timeClockTaskSummary['missed'] ?? 0) > 0 ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">Missed: <?php echo (int)($timeClockTaskSummary['missed'] ?? 0); ?></span>
+        </div>
+        <div class="timeclock-quick-actions">
+            <a class="timeclock-quick-btn" href="?action=manager_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_tasks">Open Team Tasks</a>
+            <a class="timeclock-quick-btn" href="?action=manager_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_tasks&focus=task_reports">Open Task Reports</a>
+        </div>
+    </div>
+    <div class="timeclock-launcher-card" id="mgr_pto_card">
+        <h3>PTO</h3>
+        <p class="timeclock-mobile-help">Pending approvals and approved PTO impacts.</p>
+        <div class="timeclock-quick-actions">
+            <a class="timeclock-quick-btn" href="?action=manager_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_pto">Open PTO Queue</a>
+            <a class="timeclock-quick-btn" href="?action=manager_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_admin&focus=pending_approvals">Open Approvals</a>
+        </div>
+    </div>
+    <div class="timeclock-launcher-card" id="mgr_reviews_card">
+        <h3>Performance Reviews</h3>
+        <p class="timeclock-mobile-help">Automated review pipeline (read-only placeholder for Phase 2).</p>
+        <div class="timeclock-hub-stats">
+            <span class="<?php echo (int)$managerDashboardSummary['reviews_due_soon'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">Due soon: <?php echo (int)$managerDashboardSummary['reviews_due_soon']; ?></span>
+            <span class="<?php echo (int)$managerDashboardSummary['reviews_overdue'] > 0 ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">Overdue: <?php echo (int)$managerDashboardSummary['reviews_overdue']; ?></span>
+            <span class="timeclock-badge-ok">Task completion: <?php echo (int)$timeClockTaskCompletionPct; ?>%</span>
+            <span class="<?php echo !empty($timeClockNoShowAlerts) ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">Tardy/no-show flags: <?php echo (int)count($timeClockNoShowAlerts); ?></span>
+        </div>
+    </div>
+    <div class="timeclock-launcher-card" id="mgr_notes_card">
+        <h3>Employee Notes & Counseling</h3>
+        <p class="timeclock-mobile-help">Interim counseling and employee notes queue (read-only placeholder for Phase 2).</p>
+        <div class="timeclock-hub-stats">
+            <span class="<?php echo (int)$managerDashboardSummary['coaching_notes_open'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">Open notes: <?php echo (int)$managerDashboardSummary['coaching_notes_open']; ?></span>
         </div>
     </div>
     <?php elseif ($isAdminSurface): ?>
@@ -1187,17 +1775,41 @@ include 'includes/header.php';
         <h2>Admin Time Clock Settings</h2>
         <p class="timeclock-mobile-help">Payroll controls, policy setup, export controls, and location/kiosk governance.</p>
         <div class="timeclock-quick-actions">
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_payroll">Payroll Controls</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_settings">Location/Kiosk Policies</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_pto">PTO Policy</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_admin">Audit & Approvals</button>
+            <a class="timeclock-quick-btn" href="?action=admin_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_payroll">Payroll Controls</a>
+            <a class="timeclock-quick-btn" href="?action=admin_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_settings">Location/Kiosk Policies</a>
+            <a class="timeclock-quick-btn" href="?action=admin_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_pto">PTO Policy</a>
+            <a class="timeclock-quick-btn" href="?action=admin_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_admin">Audit & Approvals</a>
+        </div>
+    </div>
+    <?php endif; ?>
+    <?php endif; ?>
+
+    <?php if ($currentAction === 'manager_dashboard' && !empty($inlinePanelByRequest['tc_panel_mgr_reviews'])): ?>
+    <div class="timeclock-mobile-card timeclock-inline-section" id="tc_panel_mgr_reviews">
+        <h2>Performance Reviews</h2>
+        <p class="timeclock-mobile-help">Dedicated review pipeline page (read-only placeholder for Phase 2 workflows).</p>
+        <div class="timeclock-hub-stats">
+            <span class="<?php echo (int)$managerDashboardSummary['reviews_due_soon'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">Due soon: <?php echo (int)$managerDashboardSummary['reviews_due_soon']; ?></span>
+            <span class="<?php echo (int)$managerDashboardSummary['reviews_overdue'] > 0 ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">Overdue: <?php echo (int)$managerDashboardSummary['reviews_overdue']; ?></span>
+            <span class="timeclock-badge-ok">Task completion: <?php echo (int)$timeClockTaskCompletionPct; ?>%</span>
+            <span class="<?php echo !empty($timeClockNoShowAlerts) ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">Tardy/no-show flags: <?php echo (int)count($timeClockNoShowAlerts); ?></span>
+        </div>
+    </div>
+    <?php endif; ?>
+    <?php if ($currentAction === 'manager_dashboard' && !empty($inlinePanelByRequest['tc_panel_mgr_notes'])): ?>
+    <div class="timeclock-mobile-card timeclock-inline-section" id="tc_panel_mgr_notes">
+        <h2>Employee Notes & Counseling</h2>
+        <p class="timeclock-mobile-help">Dedicated notes queue page (read-only placeholder for Phase 2 workflows).</p>
+        <div class="timeclock-hub-stats">
+            <span class="<?php echo (int)$managerDashboardSummary['coaching_notes_open'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">Open notes: <?php echo (int)$managerDashboardSummary['coaching_notes_open']; ?></span>
         </div>
     </div>
     <?php endif; ?>
 
+    <?php if ($isAdminSurface && !$isScheduleCenterPage && $requestedPanel === ''): ?>
     <div class="timeclock-launcher-card">
         <h2>Time Clock Functions</h2>
-        <p class="timeclock-mobile-help">Open a function in a focused popup window.</p>
+        <p class="timeclock-mobile-help">Open a function in a focused page view.</p>
         <div class="timeclock-hub-stats">
             <span class="timeclock-badge-ok">Open shifts: <?php echo (int)count($timeClockOpenShifts); ?></span>
             <span class="timeclock-badge-warning">Pending punch edits: <?php echo (int)count($timeClockPendingEditRequests); ?></span>
@@ -1218,67 +1830,69 @@ include 'includes/header.php';
         </div>
         <div class="timeclock-quick-actions">
             <?php if ($isAdminSurface): ?>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_payroll">Run Payroll</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_settings">Location Settings</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_admin">Review Audit</button>
+            <a class="timeclock-quick-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_payroll">Run Payroll</a>
+            <a class="timeclock-quick-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_settings">Location Settings</a>
+            <a class="timeclock-quick-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_admin">Review Audit</a>
             <?php else: ?>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_schedule">Add Schedule</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_tasks">Team Tasks</button>
-            <button type="button" class="timeclock-quick-btn" data-target="tc_panel_admin">Review Approvals</button>
+            <a class="timeclock-quick-btn" href="?action=schedule_center&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>">Add Schedule</a>
+            <a class="timeclock-quick-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_tasks">Team Tasks</a>
+            <a class="timeclock-quick-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_admin">Review Approvals</a>
             <?php endif; ?>
         </div>
         <div class="timeclock-launcher-grid">
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_punch" data-icon="⏱">
+            <a class="timeclock-launcher-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_punch" data-icon="⏱">
                 <span class="timeclock-launcher-title">Punch In/Out</span>
                 <span class="timeclock-launcher-subtitle">Employee clock-in and clock-out terminal</span>
-            </button>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_schedule" data-icon="🗓">
+            </a>
+            <a class="timeclock-launcher-btn" href="?action=schedule_center&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>" data-icon="🗓">
                 <span class="timeclock-launcher-title">Weekly Schedule</span>
                 <span class="timeclock-launcher-subtitle">Coverage, gaps, and overtime planning</span>
-            </button>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_staff_schedule" data-icon="🗂">
+            </a>
+            <a class="timeclock-launcher-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_staff_schedule" data-icon="🗂">
                 <span class="timeclock-launcher-title">Schedule Calendar Center</span>
                 <span class="timeclock-launcher-subtitle">Weekly/monthly staff calendar and manager day board</span>
-            </button>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_tasks" data-icon="✅">
+            </a>
+            <a class="timeclock-launcher-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_tasks" data-icon="✅">
                 <span class="timeclock-launcher-title">Task List</span>
                 <span class="timeclock-launcher-subtitle">Assign by day/shift, checkoff, and missed visibility</span>
-            </button>
+            </a>
             <?php if ($isAdminSurface && $canManageTimeclock): ?>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_settings" data-icon="📡">
+            <a class="timeclock-launcher-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_settings" data-icon="📡">
                 <span class="timeclock-launcher-title">Location & Kiosk Settings</span>
                 <span class="timeclock-launcher-subtitle">Geofence policy, radius, GPS behavior, kiosk timeout</span>
-            </button>
+            </a>
             <?php endif; ?>
             <?php if ($isAdminSurface): ?>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_pto" data-icon="🏖">
+            <a class="timeclock-launcher-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_pto" data-icon="🏖">
                 <span class="timeclock-launcher-title">PTO / Leave Setup</span>
                 <span class="timeclock-launcher-subtitle">Policies, balances, and employee requests</span>
-            </button>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_payroll" data-icon="💵">
+            </a>
+            <a class="timeclock-launcher-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_payroll" data-icon="💵">
                 <span class="timeclock-launcher-title">Payroll</span>
                 <span class="timeclock-launcher-subtitle">Periods, lock/unlock, run summary, export</span>
-            </button>
+            </a>
             <?php endif; ?>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_live" data-icon="📍">
+            <a class="timeclock-launcher-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_live" data-icon="📍">
                 <span class="timeclock-launcher-title">Live Floor View</span>
                 <span class="timeclock-launcher-subtitle">Who is clocked in and recent punches</span>
-            </button>
-            <button type="button" class="timeclock-launcher-btn" data-target="tc_panel_admin" data-icon="🛡">
+            </a>
+            <a class="timeclock-launcher-btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_admin" data-icon="🛡">
                 <span class="timeclock-launcher-title">Approvals & Audit</span>
                 <span class="timeclock-launcher-subtitle">Manager review queue and audit trail</span>
-            </button>
+            </a>
         </div>
     </div>
     <?php endif; ?>
     <div id="timeclock-popup-backdrop" class="timeclock-popup-backdrop" aria-hidden="true"></div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_punch">
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_punch']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_punch' ? ' open' : '')); ?>" id="tc_panel_punch">
         <h2>Punch In/Out</h2>
         <p class="timeclock-mobile-help">Mobile-friendly punch screen. Network connection is required.</p>
+        <div id="tc_punch_result" class="timeclock-punch-feedback" role="status" aria-live="polite" hidden></div>
+        <div id="tc_punch_feedback" class="timeclock-punch-feedback" role="status" aria-live="polite"></div>
         <?php if ($timeClockSelectedDateLocked): ?>
             <div class="timeclock-lock-notice">
-                Selected date <strong><?php echo htmlspecialchars($date); ?></strong> is inside a locked payroll period. Punches are blocked until unlocked.
+                Selected date <strong><?php echo htmlspecialchars(formatDateForUser($date)); ?></strong> is inside a locked payroll period. Punches are blocked until unlocked.
             </div>
         <?php endif; ?>
         <form method="POST" action="" id="timeclock-punch-form">
@@ -1290,32 +1904,33 @@ include 'includes/header.php';
             <input type="hidden" name="gps_lng" id="tc_gps_lng" value="">
             <input type="hidden" name="gps_accuracy_m" id="tc_gps_accuracy_m" value="">
             <input type="hidden" name="gps_status" id="tc_gps_status" value="unavailable">
-            <div class="form-group">
-                <label for="tc_employee_id">Employee</label>
-                <select id="tc_employee_id" name="employee_id" required>
-                    <option value="">Select employee...</option>
-                    <?php foreach ($timeClockEmployees as $emp): ?>
-                        <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars($emp['full_name']); ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="form-group">
-                <label for="tc_pin">PIN</label>
-                <input type="password" id="tc_pin" name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="10" required placeholder="Enter PIN">
+            <div class="timeclock-punch-compact-row">
+                <div class="form-group">
+                    <label for="tc_employee_id">Employee</label>
+                    <select id="tc_employee_id" name="employee_id" required>
+                        <option value="">Select employee...</option>
+                        <?php foreach ($timeClockEmployees as $emp): ?>
+                            <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars($emp['full_name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="tc_pin">PIN</label>
+                    <input type="password" id="tc_pin" name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="10" required placeholder="Enter PIN">
+                </div>
+                <button type="submit" name="punch_type" value="in" class="btn btn-primary timeclock-btn-in" <?php echo $timeClockSelectedDateLocked ? 'disabled title="Selected date is in a locked payroll period"' : ''; ?>>Clock In</button>
+                <button type="submit" name="punch_type" value="out" class="btn timeclock-btn-out" <?php echo $timeClockSelectedDateLocked ? 'disabled title="Selected date is in a locked payroll period"' : ''; ?>>Clock Out</button>
             </div>
             <div class="form-group">
                 <label for="tc_note">Note (optional)</label>
                 <input type="text" id="tc_note" name="punch_note" maxlength="255" placeholder="Optional note">
             </div>
             <div class="timeclock-status-line" id="tc_geo_status">GPS: Not captured yet</div>
-            <div class="timeclock-buttons">
-                <button type="submit" name="punch_type" value="in" class="btn btn-primary timeclock-btn-in" <?php echo $timeClockSelectedDateLocked ? 'disabled title="Selected date is in a locked payroll period"' : ''; ?>>Clock In</button>
-                <button type="submit" name="punch_type" value="out" class="btn timeclock-btn-out" <?php echo $timeClockSelectedDateLocked ? 'disabled title="Selected date is in a locked payroll period"' : ''; ?>>Clock Out</button>
-            </div>
         </form>
     </div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_schedule">
+    <?php if ($showIntegratedSchedulePanel): ?>
+    <div class="timeclock-mobile-card timeclock-inline-section" id="tc_panel_schedule">
         <h2>Weekly Schedule Calendar</h2>
         <?php if ($timeClockScheduleWeekRange): ?>
             <p class="timeclock-mobile-help">
@@ -1328,9 +1943,11 @@ include 'includes/header.php';
             <span class="timeclock-badge-ok">Store: <?php echo htmlspecialchars((string)($currentStore['name'] ?? ('#' . (int)$storeId))); ?></span>
             <span class="timeclock-badge-warning">Week: <?php echo htmlspecialchars((string)($timeClockScheduleWeekRange['start'] ?? '')); ?> to <?php echo htmlspecialchars((string)($timeClockScheduleWeekRange['end'] ?? '')); ?></span>
             <div class="timeclock-week-nav-actions">
-                <a class="btn" href="?action=timeclock&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)($timeClockPrevWeekDate ?? $date)); ?>&panel=tc_panel_schedule">Prev Week</a>
-                <a class="btn" href="?action=timeclock&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)($timeClockThisWeekDate ?? $date)); ?>&panel=tc_panel_schedule">This Week</a>
-                <a class="btn" href="?action=timeclock&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)($timeClockNextWeekDate ?? $date)); ?>&panel=tc_panel_schedule">Next Week</a>
+                <a class="btn" href="?action=schedule_center&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)($timeClockPrevWeekDate ?? $date)); ?>">Prev Week</a>
+                <a class="btn" href="?action=schedule_center&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)($timeClockThisWeekDate ?? $date)); ?>">This Week</a>
+                <a class="btn" href="?action=schedule_center&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)($timeClockNextWeekDate ?? $date)); ?>">Next Week</a>
+                <button type="button" class="btn" id="tc_schedule_fullscreen_btn">Full Screen</button>
+                <button type="button" class="btn" id="tc_schedule_exit_fullscreen_btn" hidden>Exit Full Screen</button>
             </div>
         </div>
         <?php if ($canManageTimeclock): ?>
@@ -1380,157 +1997,10 @@ include 'includes/header.php';
                 <div id="tc_lane_board"></div>
             </div>
         <?php endif; ?>
-        <div class="timeclock-defaults-row">
-            <div class="form-group">
-                <label for="tc_sched_default_employee">Default Employee</label>
-                <select id="tc_sched_default_employee">
-                    <option value="">Choose default...</option>
-                    <?php foreach ($timeClockEmployees as $emp): ?>
-                        <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars($emp['full_name']); ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="form-group">
-                <label for="tc_sched_default_role">Default Role</label>
-                <select id="tc_sched_default_role">
-                    <?php foreach ($timeClockRoleOptions as $roleOpt): ?>
-                        <option value="<?php echo htmlspecialchars($roleOpt); ?>" <?php echo strcasecmp($roleOpt, 'Employee') === 0 ? 'selected' : ''; ?>><?php echo htmlspecialchars($roleOpt); ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="form-group">
-                <label for="tc_sched_default_manager">Default Manager Name</label>
-                <input type="text" id="tc_sched_default_manager" placeholder="Manager name for quick add/publish">
-            </div>
-        </div>
-
-        <div class="timeclock-warning-row">
-            <?php foreach (($timeClockScheduleCalendar['coverage_by_day'] ?? []) as $dayKey => $cov): ?>
-                <?php if (($cov['gap_minutes'] ?? 0) > 0): ?>
-                    <span class="timeclock-badge-warning">
-                        <?php echo htmlspecialchars($dayKey); ?> uncovered: <?php echo (int)floor(((int)$cov['gap_minutes']) / 60); ?>h <?php echo ((int)$cov['gap_minutes']) % 60; ?>m
-                    </span>
-                <?php endif; ?>
-            <?php endforeach; ?>
-            <?php
-            $otWarnings = 0;
-            foreach (($timeClockScheduleCalendar['employee_hours'] ?? []) as $eh) {
-                if (($eh['overtime_hours'] ?? 0) > 0) $otWarnings++;
-            }
-            ?>
-            <?php if ($otWarnings > 0): ?>
-                <span class="timeclock-badge-danger"><?php echo (int)$otWarnings; ?> employee(s) over 40h this week</span>
-            <?php endif; ?>
-            <?php if (empty($timeClockScheduleCalendar['coverage_by_day']) && empty($timeClockScheduleCalendar['employee_hours'])): ?>
-                <span class="timeclock-muted">No schedule data yet.</span>
-            <?php endif; ?>
-        </div>
-
-        <div class="timeclock-calendar-grid">
-            <?php foreach (($timeClockScheduleCalendar['days'] ?? []) as $day): ?>
-                <?php $dayKey = $day['date']; $cov = $timeClockScheduleCalendar['coverage_by_day'][$dayKey] ?? null; ?>
-                <div class="timeclock-calendar-day">
-                    <div class="timeclock-calendar-day-header">
-                        <strong><?php echo htmlspecialchars($day['label']); ?></strong>
-                        <?php if ($cov && (int)$cov['gap_minutes'] > 0): ?>
-                            <span class="timeclock-badge-danger">Gap <?php echo (int)floor(((int)$cov['gap_minutes']) / 60); ?>h <?php echo ((int)$cov['gap_minutes']) % 60; ?>m</span>
-                        <?php else: ?>
-                            <span class="timeclock-badge-ok">Covered</span>
-                        <?php endif; ?>
-                    </div>
-                    <div class="timeclock-calendar-shifts">
-                        <?php $dayShifts = $timeClockScheduleCalendar['shifts_by_day'][$dayKey] ?? []; ?>
-                        <?php if (empty($dayShifts)): ?>
-                            <div class="timeclock-muted">No shifts.</div>
-                        <?php else: ?>
-                            <?php foreach ($dayShifts as $s): ?>
-                                <div class="timeclock-shift-chip">
-                                    <div><strong><?php echo htmlspecialchars($s['employee_name']); ?></strong> (<?php echo htmlspecialchars($s['role_name']); ?>)</div>
-                                    <div><?php echo htmlspecialchars($s['display_start']); ?> - <?php echo htmlspecialchars($s['display_end']); ?> | Break <?php echo (int)$s['break_minutes']; ?>m</div>
-                                </div>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
-                    </div>
-                    <?php if ($cov && !empty($cov['gap_windows'])): ?>
-                        <div class="timeclock-gap-list">
-                            <?php foreach ($cov['gap_windows'] as $gap): ?>
-                                <div class="timeclock-gap-item">Uncovered: <?php echo htmlspecialchars($gap['start']); ?> - <?php echo htmlspecialchars($gap['end']); ?></div>
-                            <?php endforeach; ?>
-                        </div>
-                    <?php endif; ?>
-                    <?php if ($canManageTimeclock): ?>
-                    <form method="POST" action="" class="timeclock-day-add-form">
-                        <input type="hidden" name="timeclock_schedule_add_shift_day" value="1">
-                        <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
-                        <input type="hidden" name="date" value="<?php echo htmlspecialchars($date); ?>">
-                        <input type="hidden" name="schedule_date" value="<?php echo htmlspecialchars($dayKey); ?>">
-                        <select name="employee_id" class="schedule-employee-input" required>
-                            <option value="">Employee...</option>
-                            <?php foreach ($timeClockEmployees as $emp): ?>
-                                <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars($emp['full_name']); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                        <div class="timeclock-time-row">
-                            <input type="time" name="schedule_start_time" required value="09:00">
-                            <input type="time" name="schedule_end_time" required value="17:00">
-                        </div>
-                        <div class="timeclock-time-row">
-                            <select name="role_name" class="schedule-role-input">
-                                <?php foreach ($timeClockRoleOptions as $roleOpt): ?>
-                                    <option value="<?php echo htmlspecialchars($roleOpt); ?>" <?php echo strcasecmp($roleOpt, 'Employee') === 0 ? 'selected' : ''; ?>><?php echo htmlspecialchars($roleOpt); ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                            <input type="number" name="break_minutes" min="0" value="0" placeholder="Break">
-                        </div>
-                        <input type="text" name="manager_name" class="schedule-manager-input" required value="<?php echo htmlspecialchars($currentUserName); ?>" readonly>
-                        <button type="submit" class="btn btn-primary">Add Shift</button>
-                    </form>
-                    <?php endif; ?>
-                </div>
-            <?php endforeach; ?>
-        </div>
-
-        <div style="margin-top: 12px;">
-            <h3 style="margin-bottom: 8px;">Weekly Hours / Overtime</h3>
-            <?php if (empty($timeClockScheduleCalendar['employee_hours'])): ?>
-                <p class="timeclock-muted">No hours yet.</p>
-            <?php else: ?>
-                <table class="history-table">
-                    <thead>
-                        <tr><th>Employee</th><th>Scheduled Hours</th><th>Overtime (&gt;40)</th></tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($timeClockScheduleCalendar['employee_hours'] as $eh): ?>
-                            <?php $ot = (float)($eh['overtime_hours'] ?? 0); ?>
-                            <tr class="<?php echo $ot > 0 ? 'timeclock-row-danger' : ''; ?>">
-                                <td><?php echo htmlspecialchars($eh['employee_name']); ?></td>
-                                <td><?php echo number_format((float)($eh['hours'] ?? 0), 2); ?> h</td>
-                                <td><?php echo $ot > 0 ? number_format($ot, 2) . ' h (WARNING)' : '0.00 h'; ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            <?php endif; ?>
-        </div>
-
-        <div style="margin-top: 12px;">
-            <?php if ($canManageTimeclock): ?>
-            <form method="POST" action="" class="timeclock-approve-controls">
-                <input type="hidden" name="timeclock_schedule_publish_week" value="1">
-                <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
-                <input type="hidden" name="date" value="<?php echo htmlspecialchars($date); ?>">
-                <input type="hidden" name="week_start_date" value="<?php echo htmlspecialchars($timeClockScheduleWeekRange['start'] ?? ''); ?>">
-                <input type="hidden" name="week_end_date" value="<?php echo htmlspecialchars($timeClockScheduleWeekRange['end'] ?? ''); ?>">
-                <input type="text" name="manager_name" class="schedule-manager-input" required value="<?php echo htmlspecialchars($currentUserName); ?>" readonly>
-                <button type="submit" class="btn btn-primary">Publish Week</button>
-            </form>
-            <?php else: ?>
-            <p class="timeclock-muted">View-only role: manager permission required to add/publish schedule.</p>
-            <?php endif; ?>
-        </div>
     </div>
+    <?php endif; ?>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_staff_schedule">
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_staff_schedule']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_staff_schedule' ? ' open' : '')); ?>" id="tc_panel_staff_schedule">
         <h2>Schedule Calendar Center</h2>
         <p class="timeclock-mobile-help">High-visibility calendar for staff plus a manager-ready daily operations board.</p>
 
@@ -1538,12 +2008,30 @@ include 'includes/header.php';
             <div class="staff-calendar-controls">
                 <div class="form-group">
                     <label for="tc_staff_calendar_employee">Employee</label>
+                    <?php if ($isEmployeeSurface): ?>
+                    <?php
+                        $lockedEmployeeLabel = 'Logged-in employee';
+                        if ($sessionEmployeeIdTc > 0) {
+                            foreach ($timeClockEmployees as $emp) {
+                                if ((int)($emp['id'] ?? 0) === (int)$sessionEmployeeIdTc) {
+                                    $lockedEmployeeLabel = (string)($emp['full_name'] ?? $lockedEmployeeLabel);
+                                    break;
+                                }
+                            }
+                        } else {
+                            $lockedEmployeeLabel = 'No linked employee';
+                        }
+                    ?>
+                    <input type="hidden" id="tc_staff_calendar_employee" value="<?php echo (int)$sessionEmployeeIdTc; ?>" data-locked-self="1">
+                    <div class="staff-calendar-locked-employee"><?php echo htmlspecialchars($lockedEmployeeLabel); ?></div>
+                    <?php else: ?>
                     <select id="tc_staff_calendar_employee">
                         <option value="">Select employee...</option>
                         <?php foreach ($timeClockEmployees as $emp): ?>
                             <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars($emp['full_name']); ?></option>
                         <?php endforeach; ?>
                     </select>
+                    <?php endif; ?>
                 </div>
                 <div class="form-group">
                     <label for="tc_staff_calendar_mode">View</label>
@@ -1572,6 +2060,7 @@ include 'includes/header.php';
             <div id="tc_staff_calendar_grid" class="staff-calendar-grid"></div>
         </div>
 
+        <?php if (!$isEmployeeSurface): ?>
         <div class="manager-day-board">
             <div class="manager-day-board-header">
                 <h3>Manager Day Board</h3>
@@ -1592,22 +2081,216 @@ include 'includes/header.php';
                 </table>
             </div>
         </div>
+        <?php endif; ?>
     </div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_tasks">
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_tasks']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_tasks' ? ' open' : '')); ?>" id="tc_panel_tasks">
+        <?php
+            $isEmployeeTaskPanel = ($currentAction === 'employee_dashboard');
+            $taskPanelManagerMode = (!$isEmployeeTaskPanel && $canManageTimeclock);
+            $taskPanelRows = $timeClockTasksForDate;
+            if ($isEmployeeTaskPanel && $timeclockTaskLogicV2Enabled && $sessionEmployeeIdTc > 0) {
+                $taskPanelRows = $timeClockVisibleTasksForEmployee;
+            } elseif ($isEmployeeTaskPanel) {
+                $taskPanelRows = array_values(array_filter($timeClockTasksForDate, function ($taskRow) use ($sessionEmployeeIdTc) {
+                    $assignedEmpId = (int)($taskRow['assigned_employee_id'] ?? 0);
+                    if ($sessionEmployeeIdTc <= 0) return $assignedEmpId <= 0;
+                    return $assignedEmpId <= 0 || $assignedEmpId === (int)$sessionEmployeeIdTc;
+                }));
+            }
+            $timeClockTodayYmd = (new DateTime('now', new DateTimeZone(TIMEZONE)))->format('Y-m-d');
+            $taskPanelSummary = ['open' => 0, 'done' => 0, 'missed' => 0];
+            $taskPanelPhaseSummary = [
+                'OPENING' => ['open' => 0, 'done' => 0, 'missed' => 0],
+                'ANYTIME' => ['open' => 0, 'done' => 0, 'missed' => 0],
+                'CLOSING' => ['open' => 0, 'done' => 0, 'missed' => 0],
+            ];
+            foreach ($taskPanelRows as $taskSummaryRow) {
+                $taskType = strtoupper((string)($taskSummaryRow['task_type'] ?? 'DAILY'));
+                $taskStatus = strtoupper((string)($taskSummaryRow['status'] ?? 'OPEN'));
+                $taskPhase = strtoupper((string)($taskSummaryRow['checklist_phase'] ?? 'ANYTIME'));
+                if (!isset($taskPanelPhaseSummary[$taskPhase])) {
+                    $taskPhase = 'ANYTIME';
+                }
+                $taskIsDone = ($taskStatus === 'DONE');
+                $taskDueDate = (string)($taskSummaryRow['due_date'] ?? '');
+                $taskAssignedDate = (string)($taskSummaryRow['task_date'] ?? '');
+                $taskIsMissed = !$taskIsDone && (($taskType === 'ONE_OFF' && $taskDueDate !== '' && $taskDueDate < $timeClockTodayYmd) || ($taskType !== 'ONE_OFF' && $taskAssignedDate < $timeClockTodayYmd));
+                if ($taskIsDone) {
+                    $taskPanelSummary['done']++;
+                    $taskPanelPhaseSummary[$taskPhase]['done']++;
+                } elseif ($taskIsMissed) {
+                    $taskPanelSummary['missed']++;
+                    $taskPanelPhaseSummary[$taskPhase]['missed']++;
+                } else {
+                    $taskPanelSummary['open']++;
+                    $taskPanelPhaseSummary[$taskPhase]['open']++;
+                }
+            }
+            $taskPhaseLabels = ['OPENING' => 'Opening', 'ANYTIME' => 'Anytime', 'CLOSING' => 'Closing'];
+            $taskAudienceLabels = [
+                'ON_DUTY_SHARED' => 'On-duty shared',
+                'ASSIGNED_EMPLOYEE' => 'Assigned employee',
+                'ASSIGNED_ROLE' => 'Assigned role',
+                'MANAGER_ONLY' => 'Manager only',
+            ];
+        ?>
         <h2>Task List</h2>
-        <p class="timeclock-mobile-help">Assign daily/shift tasks and track open, done, and missed items.</p>
+        <p class="timeclock-mobile-help">Assign daily/shift tasks and track to-do, done, and missed items.</p>
+        <?php if ($taskPanelManagerMode): ?>
+            <div class="timeclock-panel" style="margin-bottom:10px;">
+                <h3>Task Logic (V2)</h3>
+                <form method="POST" action="" class="timeclock-edit-grid">
+                    <input type="hidden" name="timeclock_task_logic_v2_save" value="1">
+                    <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
+                    <input type="hidden" name="date" value="<?php echo htmlspecialchars($date); ?>">
+                    <div class="form-group">
+                        <label for="tc_task_logic_v2_enabled">Shift-aware task logic</label>
+                        <select id="tc_task_logic_v2_enabled" name="task_logic_v2_enabled">
+                            <option value="0" <?php echo $timeclockTaskLogicV2Enabled ? '' : 'selected'; ?>>Disabled (legacy)</option>
+                            <option value="1" <?php echo $timeclockTaskLogicV2Enabled ? 'selected' : ''; ?>>Enabled (phase + audience + on-duty)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="tc_task_logic_manager_name">Manager</label>
+                        <input type="text" id="tc_task_logic_manager_name" name="manager_name" required readonly value="<?php echo htmlspecialchars($currentUserName); ?>">
+                    </div>
+                    <div class="form-group" style="display:flex; align-items:flex-end; gap:8px;">
+                        <button type="submit" class="btn btn-primary">Save Task Logic</button>
+                    </div>
+                </form>
+                <?php if ($timeclockTaskLogicV2Enabled): ?>
+                    <form method="POST" action="" style="margin-top:10px;">
+                        <input type="hidden" name="timeclock_task_logic_v2_backfill" value="1">
+                        <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
+                        <input type="hidden" name="date" value="<?php echo htmlspecialchars($date); ?>">
+                        <input type="hidden" name="manager_name" value="<?php echo htmlspecialchars($currentUserName); ?>">
+                        <button type="submit" class="btn">Backfill Existing Tasks To V2 Defaults</button>
+                    </form>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
 
         <div class="timeclock-hub-stats">
-            <span class="timeclock-badge-warning">Open: <?php echo (int)($timeClockTaskSummary['open'] ?? 0); ?></span>
-            <span class="timeclock-badge-ok">Done: <?php echo (int)($timeClockTaskSummary['done'] ?? 0); ?></span>
-            <span class="<?php echo (int)($timeClockTaskSummary['missed'] ?? 0) > 0 ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">
-                Missed: <?php echo (int)($timeClockTaskSummary['missed'] ?? 0); ?>
+            <span class="timeclock-badge-warning">To Do: <?php echo (int)($taskPanelSummary['open'] ?? 0); ?></span>
+            <span class="timeclock-badge-ok">Done: <?php echo (int)($taskPanelSummary['done'] ?? 0); ?></span>
+            <span class="<?php echo (int)($taskPanelSummary['missed'] ?? 0) > 0 ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">
+                Missed: <?php echo (int)($taskPanelSummary['missed'] ?? 0); ?>
             </span>
-            <span class="timeclock-badge-warning">Date: <?php echo htmlspecialchars($date); ?></span>
+            <span class="timeclock-badge-warning">Date: <?php echo htmlspecialchars(formatDateForUser($date)); ?></span>
+            <span class="timeclock-badge-ok">Store: <?php echo htmlspecialchars((string)($currentStore['name'] ?? ('#' . (int)$storeId))); ?></span>
+            <span class="timeclock-badge-ok">Loaded: <?php echo (int)count($taskPanelRows); ?></span>
         </div>
+        <?php if ($taskPanelManagerMode): ?>
+            <div style="margin-bottom:10px;">
+                <a class="btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_tasks&seed_tasks=1">Seed Demo Task Set</a>
+                <a class="btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&task_export=1">Export Task CSV</a>
+            </div>
+        <?php endif; ?>
+        <?php if ($taskPanelManagerMode): ?>
+            <div class="timeclock-panel task-report-panel" id="tc_task_report_panel">
+                <h3>Task Reporting (Date Range)</h3>
+                <form method="GET" action="" class="timeclock-edit-grid">
+                    <input type="hidden" name="action" value="<?php echo htmlspecialchars((string)$action); ?>">
+                    <input type="hidden" name="store" value="<?php echo (int)$storeId; ?>">
+                    <input type="hidden" name="date" value="<?php echo htmlspecialchars((string)$date); ?>">
+                    <input type="hidden" name="panel" value="tc_panel_tasks">
+                    <div class="form-group">
+                        <label for="tc_task_report_start">Start Date</label>
+                        <input type="date" id="tc_task_report_start" name="task_start" value="<?php echo htmlspecialchars((string)$timeClockTaskReportStart); ?>">
+                    </div>
+                    <div class="form-group">
+                        <label for="tc_task_report_end">End Date</label>
+                        <input type="date" id="tc_task_report_end" name="task_end" value="<?php echo htmlspecialchars((string)$timeClockTaskReportEnd); ?>">
+                    </div>
+                    <div class="form-group task-report-actions">
+                        <button type="submit" class="btn btn-primary">Refresh Report</button>
+                        <a class="btn" href="?action=<?php echo urlencode((string)$action); ?>&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_tasks&task_start=<?php echo urlencode((string)$timeClockTaskReportStart); ?>&task_end=<?php echo urlencode((string)$timeClockTaskReportEnd); ?>&task_export_range=1">Export Range CSV</a>
+                    </div>
+                </form>
+                <?php $taskRangeTotals = $timeClockTaskRangeSummary['totals'] ?? ['total' => 0, 'done' => 0, 'open' => 0, 'overdue' => 0]; ?>
+                <div class="timeclock-hub-stats">
+                    <span class="timeclock-badge-ok">Range total: <?php echo (int)($taskRangeTotals['total'] ?? 0); ?></span>
+                    <span class="timeclock-badge-ok">Done: <?php echo (int)($taskRangeTotals['done'] ?? 0); ?></span>
+                    <span class="timeclock-badge-warning">To Do: <?php echo (int)($taskRangeTotals['open'] ?? 0); ?></span>
+                    <span class="<?php echo (int)($taskRangeTotals['overdue'] ?? 0) > 0 ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">Overdue: <?php echo (int)($taskRangeTotals['overdue'] ?? 0); ?></span>
+                    <?php if ($timeclockTaskLogicV2Enabled): ?>
+                        <span class="timeclock-badge-warning">Unclaimed shared: <?php echo (int)($taskRangeTotals['unclaimed_shared'] ?? 0); ?></span>
+                        <span class="<?php echo (int)($taskRangeTotals['missed_recurring'] ?? 0) > 0 ? 'timeclock-badge-danger' : 'timeclock-badge-ok'; ?>">Missed recurring: <?php echo (int)($taskRangeTotals['missed_recurring'] ?? 0); ?></span>
+                    <?php endif; ?>
+                </div>
+                <?php if ($timeclockTaskLogicV2Enabled): ?>
+                    <?php $taskRangePhase = $timeClockTaskRangeSummary['phase'] ?? []; ?>
+                    <div class="history-table" style="margin-bottom:10px;">
+                        <table>
+                            <thead><tr><th>Phase</th><th>Total</th><th>Done</th><th>To Do</th><th>Overdue</th></tr></thead>
+                            <tbody>
+                                <?php foreach ($taskPhaseLabels as $phaseKey => $phaseLabel): ?>
+                                    <?php $phaseStats = (array)($taskRangePhase[$phaseKey] ?? ['total' => 0, 'done' => 0, 'open' => 0, 'overdue' => 0]); ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars((string)$phaseLabel); ?></td>
+                                        <td><?php echo (int)($phaseStats['total'] ?? 0); ?></td>
+                                        <td><?php echo (int)($phaseStats['done'] ?? 0); ?></td>
+                                        <td><?php echo (int)($phaseStats['open'] ?? 0); ?></td>
+                                        <td><?php echo (int)($phaseStats['overdue'] ?? 0); ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php endif; ?>
+                <div class="history-table">
+                    <table class="task-report-table">
+                        <thead><tr><th>Employee</th><th>Total</th><th>Done</th><th>To Do</th><th>Overdue</th><th>Completion</th></tr></thead>
+                        <tbody>
+                        <?php if (empty($timeClockTaskRangeSummary['rows'])): ?>
+                            <tr><td colspan="6" class="timeclock-muted">No task data in selected range.</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($timeClockTaskRangeSummary['rows'] as $r): ?>
+                                <tr>
+                                    <td><?php echo htmlspecialchars((string)($r['employee'] ?? 'Unassigned')); ?></td>
+                                    <td><?php echo (int)($r['total'] ?? 0); ?></td>
+                                    <td><?php echo (int)($r['done'] ?? 0); ?></td>
+                                    <td><?php echo (int)($r['open'] ?? 0); ?></td>
+                                    <td><?php echo (int)($r['overdue'] ?? 0); ?></td>
+                                    <td><?php echo (int)($r['completion_pct'] ?? 0); ?>%</td>
+                                </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        <?php endif; ?>
+        <?php if ($taskPanelManagerMode && !empty($timeClockTaskEmployeeSummary)): ?>
+            <div class="timeclock-panel" style="margin-bottom:10px;">
+                <h3>Completion by Employee</h3>
+                <div class="history-table">
+                    <table>
+                        <thead><tr><th>Employee</th><th>Total</th><th>Done</th><th>To Do</th><th>Completion</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($timeClockTaskEmployeeSummary as $empName => $stats): ?>
+                            <?php
+                                $totalCount = (int)($stats['total'] ?? 0);
+                                $doneCount = (int)($stats['done'] ?? 0);
+                                $openCount = (int)($stats['open'] ?? 0);
+                                $pct = $totalCount > 0 ? (int)round(($doneCount / $totalCount) * 100) : 0;
+                            ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars((string)$empName); ?></td>
+                                <td><?php echo $totalCount; ?></td>
+                                <td><?php echo $doneCount; ?></td>
+                                <td><?php echo $openCount; ?></td>
+                                <td><?php echo $pct; ?>%</td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        <?php endif; ?>
 
-        <?php if ($canManageTimeclock): ?>
+        <?php if ($taskPanelManagerMode): ?>
             <form method="POST" action="" class="timeclock-edit-grid">
                 <input type="hidden" name="timeclock_task_create" value="1">
                 <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
@@ -1617,18 +2300,66 @@ include 'includes/header.php';
                     <input type="date" id="tc_task_date" name="task_date" required value="<?php echo htmlspecialchars($date); ?>">
                 </div>
                 <div class="form-group">
+                    <label for="tc_task_type">Task Type</label>
+                    <select id="tc_task_type" name="task_type">
+                        <option value="DAILY">Daily (standard)</option>
+                        <option value="ONE_OFF">One-off (special)</option>
+                    </select>
+                </div>
+                <div class="form-group" id="tc_task_due_wrap" style="display:none;">
+                    <label for="tc_task_due_date">Due By (special task only)</label>
+                    <input type="date" id="tc_task_due_date" name="task_due_date" value="<?php echo htmlspecialchars($date); ?>">
+                </div>
+                <div class="form-group">
                     <label for="tc_task_title">Task Title</label>
                     <input type="text" id="tc_task_title" name="task_title" required maxlength="200" placeholder="e.g., Clean espresso machine">
                 </div>
+                <?php if ($timeclockTaskLogicV2Enabled): ?>
+                <div class="form-group">
+                    <label for="tc_task_phase">Checklist Phase</label>
+                    <select id="tc_task_phase" name="task_phase">
+                        <option value="OPENING">Opening</option>
+                        <option value="ANYTIME" selected>Anytime</option>
+                        <option value="CLOSING">Closing</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="tc_task_audience">Audience</label>
+                    <select id="tc_task_audience" name="task_audience">
+                        <option value="ON_DUTY_SHARED" selected>On-duty shared</option>
+                        <option value="ASSIGNED_EMPLOYEE">Assigned employee</option>
+                        <option value="ASSIGNED_ROLE">Assigned role</option>
+                        <option value="MANAGER_ONLY">Manager only</option>
+                    </select>
+                </div>
+                <?php endif; ?>
                 <div class="form-group">
                     <label for="tc_task_assignee">Assign Employee (optional)</label>
                     <select id="tc_task_assignee" name="assigned_employee_id">
                         <option value="">Unassigned</option>
-                        <?php foreach ($timeClockEmployees as $emp): ?>
+                        <?php
+                            $taskAssigneeOptions = $timeClockEmployees;
+                            if ($sessionEmployeeIdTc > 0) {
+                                usort($taskAssigneeOptions, function ($a, $b) use ($sessionEmployeeIdTc) {
+                                    $aId = (int)($a['id'] ?? 0);
+                                    $bId = (int)($b['id'] ?? 0);
+                                    if ($aId === $sessionEmployeeIdTc && $bId !== $sessionEmployeeIdTc) return -1;
+                                    if ($bId === $sessionEmployeeIdTc && $aId !== $sessionEmployeeIdTc) return 1;
+                                    return strcasecmp((string)($a['full_name'] ?? ''), (string)($b['full_name'] ?? ''));
+                                });
+                            }
+                        ?>
+                        <?php foreach ($taskAssigneeOptions as $emp): ?>
                             <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars((string)$emp['full_name']); ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
+                <?php if ($timeclockTaskLogicV2Enabled): ?>
+                <div class="form-group" id="tc_task_assigned_role_wrap" style="display:none;">
+                    <label for="tc_task_assigned_role_name">Assigned Role (for role audience)</label>
+                    <input type="text" id="tc_task_assigned_role_name" name="task_assigned_role_name" maxlength="120" placeholder="e.g., Barista, Shift Lead">
+                </div>
+                <?php endif; ?>
                 <div class="form-group">
                     <label for="tc_task_shift_id">Link to Shift (optional)</label>
                     <select id="tc_task_shift_id" name="schedule_shift_id">
@@ -1647,6 +2378,16 @@ include 'includes/header.php';
                     <label for="tc_task_details">Details (optional)</label>
                     <input type="text" id="tc_task_details" name="task_details" maxlength="500" placeholder="Notes or checklist details">
                 </div>
+                <?php if ($timeclockTaskLogicV2Enabled): ?>
+                <div class="form-group">
+                    <label for="tc_task_window_start_local">Visibility Start (optional)</label>
+                    <input type="time" id="tc_task_window_start_local" name="task_window_start_local">
+                </div>
+                <div class="form-group">
+                    <label for="tc_task_window_end_local">Visibility End (optional)</label>
+                    <input type="time" id="tc_task_window_end_local" name="task_window_end_local">
+                </div>
+                <?php endif; ?>
                 <div class="form-group">
                     <label for="tc_task_manager_name">Manager</label>
                     <input type="text" id="tc_task_manager_name" name="manager_name" required value="<?php echo htmlspecialchars($currentUserName); ?>" readonly>
@@ -1655,121 +2396,286 @@ include 'includes/header.php';
                     <button type="submit" class="btn btn-primary">Create Task</button>
                 </div>
             </form>
+            <?php if ($timeclockTaskLogicV2Enabled): ?>
+                <form method="POST" action="" class="timeclock-edit-grid" style="margin-top:10px;">
+                    <input type="hidden" name="timeclock_task_template_create" value="1">
+                    <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
+                    <input type="hidden" name="date" value="<?php echo htmlspecialchars($date); ?>">
+                    <input type="hidden" name="manager_name" value="<?php echo htmlspecialchars($currentUserName); ?>">
+                    <div class="form-group" style="grid-column:1 / -1;">
+                        <h3 style="margin:0;">Recurring Template</h3>
+                    </div>
+                    <div class="form-group">
+                        <label for="tc_tpl_title">Template Title</label>
+                        <input type="text" id="tc_tpl_title" name="template_title" required maxlength="200" placeholder="e.g., Sweep floors">
+                    </div>
+                    <div class="form-group">
+                        <label for="tc_tpl_task_type">Task Type</label>
+                        <select id="tc_tpl_task_type" name="template_task_type">
+                            <option value="DAILY">Daily (standard)</option>
+                            <option value="ONE_OFF">One-off (special)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="tc_tpl_due_offset_wrap" style="display:none;">
+                        <label for="tc_tpl_due_offset_days">Due Offset Days (one-off)</label>
+                        <input type="number" id="tc_tpl_due_offset_days" name="template_due_offset_days" min="0" max="30" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="tc_tpl_phase">Phase</label>
+                        <select id="tc_tpl_phase" name="template_phase">
+                            <option value="OPENING">Opening</option>
+                            <option value="ANYTIME" selected>Anytime</option>
+                            <option value="CLOSING">Closing</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="tc_tpl_audience">Audience</label>
+                        <select id="tc_tpl_audience" name="template_audience">
+                            <option value="ON_DUTY_SHARED" selected>On-duty shared</option>
+                            <option value="ASSIGNED_EMPLOYEE">Assigned employee</option>
+                            <option value="ASSIGNED_ROLE">Assigned role</option>
+                            <option value="MANAGER_ONLY">Manager only</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="tc_tpl_assignee_wrap" style="display:none;">
+                        <label for="tc_tpl_assigned_employee_id">Assigned Employee</label>
+                        <select id="tc_tpl_assigned_employee_id" name="template_assigned_employee_id">
+                            <option value="">Select employee...</option>
+                            <?php foreach ($taskAssigneeOptions as $emp): ?>
+                                <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars((string)$emp['full_name']); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="form-group" id="tc_tpl_role_wrap" style="display:none;">
+                        <label for="tc_tpl_assigned_role_name">Assigned Role</label>
+                        <input type="text" id="tc_tpl_assigned_role_name" name="template_assigned_role_name" maxlength="120" placeholder="e.g., Shift Lead">
+                    </div>
+                    <div class="form-group">
+                        <label for="tc_tpl_recurrence_type">Recurrence</label>
+                        <select id="tc_tpl_recurrence_type" name="template_recurrence_type">
+                            <option value="DAILY">Daily</option>
+                            <option value="WEEKDAYS">Weekdays</option>
+                            <option value="WEEKLY_SELECTED">Selected weekdays</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="tc_tpl_days_wrap" style="display:none;">
+                        <label for="tc_tpl_recurrence_days">Weekdays (0=Sun...6=Sat)</label>
+                        <input type="text" id="tc_tpl_recurrence_days" name="template_recurrence_days" placeholder="1,2,3,4,5">
+                    </div>
+                    <div class="form-group">
+                        <label for="tc_tpl_window_start_local">Visibility Start (optional)</label>
+                        <input type="time" id="tc_tpl_window_start_local" name="template_window_start_local">
+                    </div>
+                    <div class="form-group">
+                        <label for="tc_tpl_window_end_local">Visibility End (optional)</label>
+                        <input type="time" id="tc_tpl_window_end_local" name="template_window_end_local">
+                    </div>
+                    <div class="form-group" style="grid-column:1 / -1;">
+                        <label for="tc_tpl_details">Template Details (optional)</label>
+                        <input type="text" id="tc_tpl_details" name="template_details" maxlength="500" placeholder="Checklist details">
+                    </div>
+                    <div class="form-group" style="display:flex; align-items:flex-end;">
+                        <button type="submit" class="btn">Save Template</button>
+                    </div>
+                </form>
+                <?php if (!empty($timeClockTaskTemplates)): ?>
+                    <div class="history-table" style="margin-top:10px;">
+                        <table>
+                            <thead><tr><th>Template</th><th>Phase</th><th>Audience</th><th>Recurrence</th><th>Assignee</th></tr></thead>
+                            <tbody>
+                                <?php foreach ($timeClockTaskTemplates as $tpl): ?>
+                                    <?php
+                                        $tplPhase = strtoupper((string)($tpl['checklist_phase'] ?? 'ANYTIME'));
+                                        $tplAudience = strtoupper((string)($tpl['audience_type'] ?? 'ON_DUTY_SHARED'));
+                                        $tplRecurrence = strtoupper((string)($tpl['recurrence_type'] ?? 'DAILY'));
+                                        $tplAssignee = trim((string)($tpl['assigned_employee_name'] ?? ''));
+                                        if ($tplAssignee === '' && !empty($tpl['assigned_role_name'])) {
+                                            $tplAssignee = 'Role: ' . (string)$tpl['assigned_role_name'];
+                                        }
+                                        if ($tplAssignee === '') {
+                                            $tplAssignee = '-';
+                                        }
+                                    ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars((string)($tpl['title'] ?? '')); ?></td>
+                                        <td><?php echo htmlspecialchars((string)($taskPhaseLabels[$tplPhase] ?? 'Anytime')); ?></td>
+                                        <td><?php echo htmlspecialchars((string)($taskAudienceLabels[$tplAudience] ?? 'On-duty shared')); ?></td>
+                                        <td><?php echo htmlspecialchars($tplRecurrence . (!empty($tpl['recurrence_days']) ? ' [' . (string)$tpl['recurrence_days'] . ']' : '')); ?></td>
+                                        <td><?php echo htmlspecialchars($tplAssignee); ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php endif; ?>
+            <?php endif; ?>
         <?php else: ?>
             <p class="timeclock-muted">View-only role: manager permission required to create/delete tasks.</p>
         <?php endif; ?>
 
-        <div class="history-table" style="margin-top:12px;">
-            <table>
-                <thead>
-                <tr>
-                    <th>Task</th>
-                    <th>Assigned</th>
-                    <th>Shift</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                </tr>
-                </thead>
-                <tbody>
-                <?php if (empty($timeClockTasksForDate)): ?>
-                    <tr><td colspan="5" class="timeclock-muted">No tasks for this date yet.</td></tr>
-                <?php else: ?>
-                    <?php $timeClockTodayYmd = (new DateTime('now', new DateTimeZone(TIMEZONE)))->format('Y-m-d'); ?>
-                    <?php foreach ($timeClockTasksForDate as $taskRow): ?>
+        <?php if (empty($taskPanelRows)): ?>
+            <p class="timeclock-muted" id="tc_tasks_table_wrap" style="margin-top:12px;">No tasks for this date yet.</p>
+        <?php else: ?>
+            <?php
+                $tasksByPhase = [
+                    'OPENING' => [],
+                    'ANYTIME' => [],
+                    'CLOSING' => [],
+                ];
+                foreach ($taskPanelRows as $taskRow) {
+                    $phaseKey = strtoupper((string)($taskRow['checklist_phase'] ?? 'ANYTIME'));
+                    if (!isset($tasksByPhase[$phaseKey])) {
+                        $phaseKey = 'ANYTIME';
+                    }
+                    $tasksByPhase[$phaseKey][] = $taskRow;
+                }
+            ?>
+            <div id="tc_tasks_table_wrap" class="tasklist-groups">
+            <?php foreach ($taskPhaseLabels as $phaseKey => $phaseLabel): ?>
+                <?php $taskRows = (array)($tasksByPhase[$phaseKey] ?? []); ?>
+                <?php if (empty($taskRows)) continue; ?>
+                <div class="tasklist-employee-card">
+                    <h3>
+                        <?php echo htmlspecialchars((string)$phaseLabel); ?>
+                        <span class="timeclock-muted" style="font-size:12px;">(To Do: <?php echo (int)($taskPanelPhaseSummary[$phaseKey]['open'] ?? 0); ?>, Done: <?php echo (int)($taskPanelPhaseSummary[$phaseKey]['done'] ?? 0); ?>, Missed: <?php echo (int)($taskPanelPhaseSummary[$phaseKey]['missed'] ?? 0); ?>)</span>
+                    </h3>
+                    <?php foreach ($taskRows as $taskRow): ?>
                         <?php
+                            $taskType = strtoupper((string)($taskRow['task_type'] ?? 'DAILY'));
+                            $taskIsOneOff = $taskType === 'ONE_OFF';
                             $taskStatus = strtoupper((string)($taskRow['status'] ?? 'OPEN'));
                             $taskIsDone = $taskStatus === 'DONE';
-                            $taskIsMissed = !$taskIsDone && ((string)($taskRow['task_date'] ?? '') < $timeClockTodayYmd);
+                            $taskPhase = strtoupper((string)($taskRow['checklist_phase'] ?? 'ANYTIME'));
+                            if (!isset($taskPhaseLabels[$taskPhase])) $taskPhase = 'ANYTIME';
+                            $taskAudience = strtoupper((string)($taskRow['audience_type'] ?? 'ON_DUTY_SHARED'));
+                            $taskAssignedEmployeeId = (int)($taskRow['assigned_employee_id'] ?? 0);
+                            $taskDueDate = (string)($taskRow['due_date'] ?? '');
+                            $taskAssignedDate = (string)($taskRow['task_date'] ?? '');
+                            $taskIsMissed = !$taskIsDone && (($taskIsOneOff && $taskDueDate !== '' && $taskDueDate < $timeClockTodayYmd) || (!$taskIsOneOff && $taskAssignedDate < $timeClockTodayYmd));
+                            $taskEmployeeLabel = trim((string)($taskRow['assigned_employee_name'] ?? ''));
+                            if ($taskEmployeeLabel === '') {
+                                if ($taskAudience === 'ASSIGNED_ROLE' && !empty($taskRow['assigned_role_name'])) {
+                                    $taskEmployeeLabel = 'Role: ' . (string)$taskRow['assigned_role_name'];
+                                } elseif ($taskAudience === 'MANAGER_ONLY') {
+                                    $taskEmployeeLabel = 'Manager only';
+                                } else {
+                                    $taskEmployeeLabel = 'Shared';
+                                }
+                            }
                         ?>
-                        <tr>
-                            <td>
-                                <strong><?php echo htmlspecialchars((string)($taskRow['title'] ?? '')); ?></strong>
-                                <?php if (!empty($taskRow['details'])): ?>
-                                    <div class="timeclock-muted"><?php echo htmlspecialchars((string)$taskRow['details']); ?></div>
-                                <?php endif; ?>
-                            </td>
-                            <td><?php echo htmlspecialchars((string)($taskRow['assigned_employee_name'] ?? 'Unassigned')); ?></td>
-                            <td>
-                                <?php if (!empty($taskRow['assigned_shift_start_utc']) && !empty($taskRow['assigned_shift_end_utc'])): ?>
-                                    <?php echo htmlspecialchars((string)($taskRow['assigned_shift_role'] ?? 'Employee')); ?>
-                                    <div class="timeclock-muted">
-                                        <?php echo htmlspecialchars(formatUtcTimestampForDisplay($taskRow['assigned_shift_start_utc'] ?? null) . ' - ' . formatUtcTimestampForDisplay($taskRow['assigned_shift_end_utc'] ?? null)); ?>
-                                    </div>
-                                <?php else: ?>
-                                    <span class="timeclock-muted">-</span>
-                                <?php endif; ?>
-                            </td>
-                            <td>
-                                <?php if ($taskIsDone): ?>
-                                    <span class="timeclock-badge-ok">DONE</span>
-                                    <?php if (!empty($taskRow['completed_by'])): ?>
-                                        <div class="timeclock-muted">By <?php echo htmlspecialchars((string)$taskRow['completed_by']); ?></div>
-                                    <?php endif; ?>
-                                <?php elseif ($taskIsMissed): ?>
-                                    <span class="timeclock-badge-danger">MISSED</span>
-                                <?php else: ?>
-                                    <span class="timeclock-badge-warning">OPEN</span>
-                                <?php endif; ?>
-                            </td>
-                            <td>
-                                <?php if (!$taskIsDone): ?>
-                                    <form method="POST" action="" class="timeclock-approve-controls">
+                        <div class="tasklist-item timeclock-task-row <?php echo $taskIsOneOff ? 'is-oneoff' : 'is-daily'; ?> <?php echo $taskIsDone ? 'is-done' : ''; ?>" data-task-state="<?php echo $taskIsDone ? 'done' : ($taskIsMissed ? 'missed' : 'open'); ?>">
+                            <div class="tasklist-item-main">
+                                <?php if ($taskPanelManagerMode): ?>
+                                    <form method="POST" action="" class="tasklist-check-form">
                                         <input type="hidden" name="timeclock_task_toggle" value="1">
                                         <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
                                         <input type="hidden" name="task_id" value="<?php echo (int)($taskRow['id'] ?? 0); ?>">
                                         <input type="hidden" name="task_date" value="<?php echo htmlspecialchars($date); ?>">
-                                        <input type="hidden" name="task_status" value="DONE">
-                                        <select name="employee_id" required>
-                                            <option value="">Employee...</option>
-                                            <?php foreach ($timeClockEmployees as $emp): ?>
-                                                <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars((string)$emp['full_name']); ?></option>
-                                            <?php endforeach; ?>
-                                        </select>
-                                        <input type="password" name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="10" required placeholder="PIN">
-                                        <button type="submit" class="btn btn-primary">Mark Done</button>
+                                        <input type="hidden" name="task_status" value="<?php echo $taskIsDone ? 'OPEN' : 'DONE'; ?>">
+                                        <input type="hidden" name="manager_name" value="<?php echo htmlspecialchars($currentUserName); ?>">
+                                        <label class="tasklist-checkbox">
+                                            <input type="checkbox" <?php echo $taskIsDone ? 'checked' : ''; ?> onchange="this.form.submit()">
+                                            <span>Complete</span>
+                                        </label>
                                     </form>
-                                    <?php if ($canManageTimeclock): ?>
-                                        <form method="POST" action="" style="margin-top:6px;">
+                                <?php elseif (($isEmployeeTaskPanel || currentUserCan('employee_self_service')) && !$taskIsDone): ?>
+                                    <?php if ($sessionEmployeeIdTc > 0 && $taskAssignedEmployeeId > 0 && $taskAssignedEmployeeId !== $sessionEmployeeIdTc): ?>
+                                        <div class="timeclock-muted">Assigned to another employee</div>
+                                    <?php else: ?>
+                                        <form method="POST" action="" class="tasklist-employee-complete-form">
                                             <input type="hidden" name="timeclock_task_toggle" value="1">
                                             <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
                                             <input type="hidden" name="task_id" value="<?php echo (int)($taskRow['id'] ?? 0); ?>">
                                             <input type="hidden" name="task_date" value="<?php echo htmlspecialchars($date); ?>">
                                             <input type="hidden" name="task_status" value="DONE">
-                                            <input type="hidden" name="manager_name" value="<?php echo htmlspecialchars($currentUserName); ?>">
-                                            <button type="submit" class="btn">Manager Complete</button>
+                                            <?php if ($sessionEmployeeIdTc > 0): ?>
+                                                <input type="hidden" name="employee_id" value="<?php echo (int)$sessionEmployeeIdTc; ?>">
+                                                <div class="tasklist-employee-complete-label"><?php echo $taskAssignedEmployeeId > 0 ? 'Assigned to you' : 'Unassigned task: complete with your PIN'; ?></div>
+                                            <?php else: ?>
+                                                <?php
+                                                    $taskCompletionEmployeeOptions = $timeClockEmployees;
+                                                    if ($sessionEmployeeIdTc > 0) {
+                                                        usort($taskCompletionEmployeeOptions, function ($a, $b) use ($sessionEmployeeIdTc) {
+                                                            $aId = (int)($a['id'] ?? 0);
+                                                            $bId = (int)($b['id'] ?? 0);
+                                                            if ($aId === $sessionEmployeeIdTc && $bId !== $sessionEmployeeIdTc) return -1;
+                                                            if ($bId === $sessionEmployeeIdTc && $aId !== $sessionEmployeeIdTc) return 1;
+                                                            return strcasecmp((string)($a['full_name'] ?? ''), (string)($b['full_name'] ?? ''));
+                                                        });
+                                                    }
+                                                ?>
+                                                <select name="employee_id" required>
+                                                    <option value="">Employee...</option>
+                                                    <?php foreach ($taskCompletionEmployeeOptions as $emp): ?>
+                                                        <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars((string)$emp['full_name']); ?></option>
+                                                    <?php endforeach; ?>
+                                                </select>
+                                            <?php endif; ?>
+                                            <?php if (!($isEmployeeTaskPanel && $sessionEmployeeIdTc > 0)): ?>
+                                            <input type="password" name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="10" required placeholder="PIN">
+                                            <?php endif; ?>
+                                            <button type="submit" class="btn btn-primary">Complete</button>
                                         </form>
                                     <?php endif; ?>
-                                <?php elseif ($canManageTimeclock): ?>
-                                    <form method="POST" action="" style="display:inline-block;">
-                                        <input type="hidden" name="timeclock_task_toggle" value="1">
-                                        <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
-                                        <input type="hidden" name="task_id" value="<?php echo (int)($taskRow['id'] ?? 0); ?>">
-                                        <input type="hidden" name="task_date" value="<?php echo htmlspecialchars($date); ?>">
-                                        <input type="hidden" name="task_status" value="OPEN">
-                                        <input type="hidden" name="manager_name" value="<?php echo htmlspecialchars($currentUserName); ?>">
-                                        <button type="submit" class="btn">Reopen</button>
-                                    </form>
                                 <?php endif; ?>
-                                <?php if ($canManageTimeclock): ?>
-                                    <form method="POST" action="" style="display:inline-block; margin-left:6px;" onsubmit="return confirm('Delete this task?');">
-                                        <input type="hidden" name="timeclock_task_delete" value="1">
-                                        <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
-                                        <input type="hidden" name="task_id" value="<?php echo (int)($taskRow['id'] ?? 0); ?>">
-                                        <input type="hidden" name="task_date" value="<?php echo htmlspecialchars($date); ?>">
-                                        <input type="hidden" name="manager_name" value="<?php echo htmlspecialchars($currentUserName); ?>">
-                                        <button type="submit" class="btn">Delete</button>
-                                    </form>
-                                <?php endif; ?>
-                            </td>
-                        </tr>
+                                <div class="tasklist-copy">
+                                    <div class="tasklist-title-row">
+                                        <strong class="tasklist-title"><?php echo htmlspecialchars((string)($taskRow['title'] ?? '')); ?></strong>
+                                        <span class="timeclock-badge-ok"><?php echo htmlspecialchars((string)($taskAudienceLabels[$taskAudience] ?? 'On-duty shared')); ?></span>
+                                        <span class="<?php echo $taskIsOneOff ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">
+                                            <?php echo $taskIsOneOff ? 'SPECIAL TASK' : 'DAILY TASK'; ?>
+                                        </span>
+                                        <?php if ($taskIsDone): ?>
+                                            <span class="timeclock-badge-ok">COMPLETED</span>
+                                        <?php elseif ($taskIsMissed): ?>
+                                            <span class="timeclock-badge-danger">OVERDUE</span>
+                                        <?php else: ?>
+                                            <span class="timeclock-badge-warning">TO DO</span>
+                                        <?php endif; ?>
+                                    </div>
+                                    <?php if (!empty($taskRow['details'])): ?>
+                                        <div class="timeclock-muted"><?php echo htmlspecialchars((string)$taskRow['details']); ?></div>
+                                    <?php endif; ?>
+                                    <div class="tasklist-meta">
+                                        <span>Assignment: <?php echo htmlspecialchars($taskEmployeeLabel); ?></span>
+                                        <span>Assigned: <?php echo htmlspecialchars(formatDateForUser($taskAssignedDate)); ?></span>
+                                        <?php if ($taskIsOneOff): ?>
+                                            <span>Due by: <?php echo htmlspecialchars($taskDueDate !== '' ? formatDateForUser($taskDueDate) : '-'); ?></span>
+                                        <?php endif; ?>
+                                        <?php if (!empty($taskRow['assigned_shift_start_utc']) && !empty($taskRow['assigned_shift_end_utc'])): ?>
+                                            <span>Shift: <?php echo htmlspecialchars((string)($taskRow['assigned_shift_role'] ?? 'Employee')); ?> <?php echo htmlspecialchars(formatUtcTimestampForDisplay($taskRow['assigned_shift_start_utc'] ?? null) . ' - ' . formatUtcTimestampForDisplay($taskRow['assigned_shift_end_utc'] ?? null)); ?></span>
+                                        <?php endif; ?>
+                                        <?php if ($taskIsDone && !empty($taskRow['completed_by'])): ?>
+                                            <span>Completed by: <?php echo htmlspecialchars((string)$taskRow['completed_by']); ?></span>
+                                            <?php if (!empty($taskRow['completed_at'])): ?>
+                                                <span>Completed at: <?php echo htmlspecialchars(formatDateTimeForUser((string)$taskRow['completed_at'])); ?></span>
+                                            <?php endif; ?>
+                                            <?php if (!empty($taskRow['completion_source'])): ?>
+                                                <span>Source: <?php echo htmlspecialchars((string)$taskRow['completion_source']); ?></span>
+                                            <?php endif; ?>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                            </div>
+                            <?php if ($taskPanelManagerMode): ?>
+                                <form method="POST" action="" class="tasklist-delete-form" onsubmit="return confirm('Delete this task?');">
+                                    <input type="hidden" name="timeclock_task_delete" value="1">
+                                    <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
+                                    <input type="hidden" name="task_id" value="<?php echo (int)($taskRow['id'] ?? 0); ?>">
+                                    <input type="hidden" name="task_date" value="<?php echo htmlspecialchars($date); ?>">
+                                    <input type="hidden" name="manager_name" value="<?php echo htmlspecialchars($currentUserName); ?>">
+                                    <button type="submit" class="btn">Delete</button>
+                                </form>
+                            <?php endif; ?>
+                        </div>
                     <?php endforeach; ?>
-                <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
+                </div>
+            <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
     </div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_settings">
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_settings']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_settings' ? ' open' : '')); ?>" id="tc_panel_settings">
         <h2>Location & Kiosk Settings</h2>
         <p class="timeclock-mobile-help">Configure store geofence policy and kiosk auto-reset timeout.</p>
         <?php if ($canManageTimeclock): ?>
@@ -1849,11 +2755,27 @@ include 'includes/header.php';
         <?php endif; ?>
     </div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_pto">
-        <h2>PTO / Leave Setup (Company-Wide)</h2>
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_pto']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_pto' ? ' open' : '')); ?>" id="tc_panel_pto">
+        <?php
+            $isEmployeePtoView = ($currentAction === 'employee_dashboard');
+            $ptoBalanceRowsForView = $timeClockPtoBalances;
+            if ($isEmployeePtoView && $sessionEmployeeIdTc > 0) {
+                $ptoBalanceRowsForView = array_values(array_filter($timeClockPtoBalances, function ($row) use ($sessionEmployeeIdTc) {
+                    return (int)($row['employee_id'] ?? 0) === (int)$sessionEmployeeIdTc;
+                }));
+            }
+            $ptoRecentRowsForView = $timeClockRecentPtoRequests;
+            if ($isEmployeePtoView && $sessionEmployeeIdTc > 0) {
+                $ptoRecentRowsForView = array_values(array_filter($timeClockRecentPtoRequests, function ($row) use ($sessionEmployeeIdTc) {
+                    return (int)($row['employee_id'] ?? 0) === (int)$sessionEmployeeIdTc;
+                }));
+            }
+        ?>
+        <h2><?php echo $isEmployeePtoView ? 'My PTO' : 'PTO / Leave Setup (Company-Wide)'; ?></h2>
         <p class="timeclock-mobile-help">
             Common US setup defaults are included. This is a policy setup aid, not legal advice.
         </p>
+        <?php if (!$isEmployeePtoView): ?>
         <form method="POST" action="">
             <input type="hidden" name="timeclock_pto_settings_save" value="1">
             <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
@@ -1934,10 +2856,17 @@ include 'includes/header.php';
                 </div>
             </div>
         </form>
+        <?php else: ?>
+        <div class="timeclock-hub-stats">
+            <span class="timeclock-badge-ok">PTO available: <?php echo number_format((float)$employeeDashboardSummary['pto_available_hours'], 2); ?> h</span>
+            <span class="<?php echo (int)$employeeDashboardSummary['pto_upcoming_count'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">Upcoming PTO: <?php echo (int)$employeeDashboardSummary['pto_upcoming_count']; ?></span>
+            <span class="timeclock-badge-ok">Next PTO: <?php echo htmlspecialchars((string)$employeeDashboardSummary['next_pto_label']); ?></span>
+        </div>
+        <?php endif; ?>
 
         <hr style="margin: 14px 0; border: none; border-top: 1px solid #e5e7eb;">
-        <h3 style="margin-bottom: 8px;">Employee PTO Balances</h3>
-        <?php if (empty($timeClockPtoBalances)): ?>
+        <h3 style="margin-bottom: 8px;"><?php echo $isEmployeePtoView ? 'My PTO Balance' : 'Employee PTO Balances'; ?></h3>
+        <?php if (empty($ptoBalanceRowsForView)): ?>
             <p class="timeclock-muted">No PTO balances yet.</p>
         <?php else: ?>
             <table class="history-table">
@@ -1945,7 +2874,7 @@ include 'includes/header.php';
                     <tr><th>Employee</th><th>Accrued</th><th>Used</th><th>Pending</th><th>Available</th></tr>
                 </thead>
                 <tbody>
-                    <?php foreach ($timeClockPtoBalances as $bal): ?>
+                    <?php foreach ($ptoBalanceRowsForView as $bal): ?>
                         <tr>
                             <td><?php echo htmlspecialchars($bal['full_name']); ?></td>
                             <td><?php echo number_format(((int)$bal['accrued_minutes']) / 60, 2); ?> h</td>
@@ -1966,17 +2895,35 @@ include 'includes/header.php';
                 <input type="hidden" name="date" value="<?php echo htmlspecialchars($date); ?>">
                 <div class="form-group">
                     <label for="tc_pto_emp">Employee</label>
+                    <?php if ($isEmployeePtoView): ?>
+                    <?php
+                        $ptoEmployeeLabel = 'No linked employee';
+                        if ($sessionEmployeeIdTc > 0) {
+                            foreach ($timeClockEmployees as $emp) {
+                                if ((int)($emp['id'] ?? 0) === (int)$sessionEmployeeIdTc) {
+                                    $ptoEmployeeLabel = (string)($emp['full_name'] ?? $ptoEmployeeLabel);
+                                    break;
+                                }
+                            }
+                        }
+                    ?>
+                    <input type="hidden" id="tc_pto_emp" name="employee_id" value="<?php echo (int)$sessionEmployeeIdTc; ?>">
+                    <div class="staff-calendar-locked-employee"><?php echo htmlspecialchars($ptoEmployeeLabel); ?></div>
+                    <?php else: ?>
                     <select id="tc_pto_emp" name="employee_id" required>
                         <option value="">Select employee...</option>
                         <?php foreach ($timeClockEmployees as $emp): ?>
                             <option value="<?php echo (int)$emp['id']; ?>"><?php echo htmlspecialchars($emp['full_name']); ?></option>
                         <?php endforeach; ?>
                     </select>
+                    <?php endif; ?>
                 </div>
+                <?php if (!$isEmployeePtoView || $sessionEmployeeIdTc <= 0): ?>
                 <div class="form-group">
                     <label for="tc_pto_pin">PIN</label>
                     <input type="password" id="tc_pto_pin" name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="10" required placeholder="Enter PIN">
                 </div>
+                <?php endif; ?>
                 <div class="form-group">
                     <label for="tc_pto_start">Start date</label>
                     <input type="date" id="tc_pto_start" name="pto_start_date" required>
@@ -1999,6 +2946,7 @@ include 'includes/header.php';
             </form>
         </div>
 
+        <?php if (!$isEmployeePtoView): ?>
         <div class="timeclock-grid" style="margin-top: 14px;">
             <div class="timeclock-panel">
                 <h3>Pending PTO Requests (Manager)</h3>
@@ -2014,7 +2962,7 @@ include 'includes/header.php';
                             <input type="hidden" name="request_id" value="<?php echo (int)$req['id']; ?>">
                             <div class="timeclock-request-row">
                                 <div><strong><?php echo htmlspecialchars($req['full_name']); ?></strong> requested <?php echo number_format(((int)$req['requested_minutes']) / 60, 2); ?> h</div>
-                                <div class="timeclock-muted"><?php echo htmlspecialchars($req['request_start_date']); ?> to <?php echo htmlspecialchars($req['request_end_date']); ?></div>
+                                <div class="timeclock-muted"><?php echo htmlspecialchars(formatDateForUser($req['request_start_date'] ?? '')); ?> to <?php echo htmlspecialchars(formatDateForUser($req['request_end_date'] ?? '')); ?></div>
                                 <div>Reason: <?php echo htmlspecialchars($req['reason']); ?></div>
                                 <?php if ($isPtoReqLocked): ?>
                                     <div class="timeclock-lock-notice-inline">This PTO request overlaps a locked payroll period. Approve is disabled until unlocked.</div>
@@ -2043,7 +2991,7 @@ include 'includes/header.php';
                             <?php foreach ($timeClockRecentPtoRequests as $req): ?>
                                 <tr>
                                     <td><?php echo htmlspecialchars($req['full_name']); ?></td>
-                                    <td><?php echo htmlspecialchars($req['request_start_date']); ?> to <?php echo htmlspecialchars($req['request_end_date']); ?></td>
+                                    <td><?php echo htmlspecialchars(formatDateForUser($req['request_start_date'] ?? '')); ?> to <?php echo htmlspecialchars(formatDateForUser($req['request_end_date'] ?? '')); ?></td>
                                     <td><?php echo number_format(((int)$req['requested_minutes']) / 60, 2); ?> h</td>
                                     <td><?php echo htmlspecialchars($req['status']); ?></td>
                                     <td><?php echo htmlspecialchars($req['reviewed_by'] ?? '-'); ?></td>
@@ -2054,9 +3002,32 @@ include 'includes/header.php';
                 <?php endif; ?>
             </div>
         </div>
+        <?php else: ?>
+        <div class="timeclock-panel" style="margin-top: 14px;">
+            <h3>My Recent PTO Requests</h3>
+            <?php if (empty($ptoRecentRowsForView)): ?>
+                <p class="timeclock-muted">No PTO requests yet.</p>
+            <?php else: ?>
+                <table class="history-table">
+                    <thead>
+                        <tr><th>Dates</th><th>Hours</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($ptoRecentRowsForView as $req): ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars(formatDateForUser($req['request_start_date'] ?? '')); ?> to <?php echo htmlspecialchars(formatDateForUser($req['request_end_date'] ?? '')); ?></td>
+                                <td><?php echo number_format(((int)$req['requested_minutes']) / 60, 2); ?> h</td>
+                                <td><?php echo htmlspecialchars($req['status']); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+        </div>
+        <?php endif; ?>
     </div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_payroll">
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_payroll']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_payroll' ? ' open' : '')); ?>" id="tc_panel_payroll">
         <h2>Payroll Periods & Summary</h2>
         <p class="timeclock-mobile-help">Run payroll summary (regular/OT + loaded labor cost) for a selected period.</p>
         <form method="POST" action="" class="timeclock-edit-grid">
@@ -2091,7 +3062,7 @@ include 'includes/header.php';
                     <?php foreach ($timeClockPayrollPeriods as $pp): ?>
                         <?php $pid = (int)$pp['id']; ?>
                         <option value="<?php echo $pid; ?>" <?php echo $timeClockSelectedPayrollPeriodId === $pid ? 'selected' : ''; ?>>
-                            #<?php echo $pid; ?> | <?php echo htmlspecialchars($pp['period_start_date']); ?> to <?php echo htmlspecialchars($pp['period_end_date']); ?> (<?php echo htmlspecialchars($pp['status']); ?>)
+                            #<?php echo $pid; ?> | <?php echo htmlspecialchars(formatDateForUser($pp['period_start_date'] ?? '')); ?> to <?php echo htmlspecialchars(formatDateForUser($pp['period_end_date'] ?? '')); ?> (<?php echo htmlspecialchars($pp['status']); ?>)
                         </option>
                     <?php endforeach; ?>
                 </select>
@@ -2157,12 +3128,12 @@ include 'includes/header.php';
         <?php endif; ?>
     </div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_requests">
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_requests']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_requests' ? ' open' : '')); ?>" id="tc_panel_requests">
         <h2>Request Missed Punch / Shift Edit</h2>
         <p class="timeclock-mobile-help">Employee submits request with PIN. Manager reviews below.</p>
         <?php if ($timeClockSelectedDateLocked): ?>
             <div class="timeclock-lock-notice">
-                Selected date <strong><?php echo htmlspecialchars($date); ?></strong> is locked. New requests for this date range are likely to be blocked.
+                Selected date <strong><?php echo htmlspecialchars(formatDateForUser($date)); ?></strong> is locked. New requests for this date range are likely to be blocked.
             </div>
         <?php endif; ?>
         <form method="POST" action="">
@@ -2219,10 +3190,10 @@ include 'includes/header.php';
         </form>
     </div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_live">
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_live']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_live' ? ' open' : '')); ?>" id="tc_panel_live">
         <h2>Live Floor View</h2>
         <div class="timeclock-grid">
-        <div class="timeclock-panel">
+        <div class="timeclock-panel" id="tc_live_open_shifts">
             <h3>Open Shifts</h3>
             <?php if (empty($timeClockOpenShifts)): ?>
                 <p class="timeclock-muted">No one is currently clocked in.</p>
@@ -2268,7 +3239,7 @@ include 'includes/header.php';
     </div>
     </div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_reminders">
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_reminders']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_reminders' ? ' open' : '')); ?>" id="tc_panel_reminders">
         <h2>Reminders & Alarms</h2>
         <p class="timeclock-mobile-help">In-app reminders for upcoming shifts and missed clock-ins based on store settings.</p>
         <div class="timeclock-hub-stats">
@@ -2317,11 +3288,11 @@ include 'includes/header.php';
         <?php endif; ?>
     </div>
 
-    <div class="timeclock-mobile-card timeclock-popup-section" id="tc_panel_admin">
+    <div class="timeclock-mobile-card <?php echo !empty($inlinePanelByRequest['tc_panel_admin']) ? 'timeclock-inline-section' : ('timeclock-popup-section' . ($requestedPanel === 'tc_panel_admin' ? ' open' : '')); ?>" id="tc_panel_admin">
         <h2>Approvals & Audit</h2>
-        <div class="timeclock-panel" style="margin-bottom: 12px;">
+        <div class="timeclock-panel" id="tc_admin_missed_clockins" style="margin-bottom: 12px;">
             <h3>Missed Clock-In Alerts</h3>
-            <p class="timeclock-muted">Date: <?php echo htmlspecialchars($date); ?> | Grace: <?php echo (int)$timeClockNoShowGraceMinutes; ?> min</p>
+            <p class="timeclock-muted">Date: <?php echo htmlspecialchars(formatDateForUser($date)); ?> | Grace: <?php echo (int)$timeClockNoShowGraceMinutes; ?> min</p>
             <?php if (empty($timeClockNoShowAlerts)): ?>
                 <p class="timeclock-badge-ok">No missed clock-ins detected for selected date.</p>
             <?php else: ?>
@@ -2343,7 +3314,7 @@ include 'includes/header.php';
             <?php endif; ?>
         </div>
         <div class="timeclock-grid">
-        <div class="timeclock-panel">
+        <div class="timeclock-panel" id="tc_admin_pending_edit_requests">
             <h3>Pending Edit Requests (Manager)</h3>
             <?php if (empty($timeClockPendingEditRequests)): ?>
                 <p class="timeclock-muted">No pending edit requests.</p>
@@ -2549,6 +3520,34 @@ include 'includes/header.php';
     <?php endif; ?>
     </div>
     <script>
+    // Failsafe popup launcher so task/timeclock buttons keep working
+    // even if later scripts encounter runtime issues.
+    (function () {
+        var openPanelFallback = function (targetId) {
+            var panel = document.getElementById(String(targetId || ''));
+            var backdrop = document.getElementById('timeclock-popup-backdrop');
+            if (!panel || !backdrop || !panel.classList.contains('timeclock-popup-section')) return;
+            document.querySelectorAll('.timeclock-popup-section').forEach(function (p) {
+                p.classList.remove('open');
+                p.setAttribute('aria-hidden', 'true');
+            });
+            panel.classList.add('open');
+            panel.setAttribute('aria-hidden', 'false');
+            backdrop.classList.add('open');
+            document.body.classList.add('timeclock-popup-open');
+        };
+        document.addEventListener('click', function (e) {
+            var btn = e.target && e.target.closest ? e.target.closest('[data-target]') : null;
+            if (!btn) return;
+            var href = String(btn.getAttribute('href') || '');
+            if (btn.tagName === 'A' && href && href.charAt(0) !== '#') return;
+            var target = btn.getAttribute('data-target');
+            if (!target || !/^tc_panel_/.test(target)) return;
+            openPanelFallback(target);
+        }, true);
+    })();
+    </script>
+    <script>
     (function () {
         var backdrop = document.getElementById('timeclock-popup-backdrop');
         var launcherButtons = document.querySelectorAll('.timeclock-launcher-btn, .timeclock-quick-btn');
@@ -2575,13 +3574,46 @@ include 'includes/header.php';
 
         var openPanel = function (targetId) {
             var panel = document.getElementById(targetId);
-            if (!panel) return;
+            if (!panel || !panel.classList.contains('timeclock-popup-section')) return;
             panels.forEach(function (p) { p.classList.remove('open'); p.setAttribute('aria-hidden', 'true'); });
             panel.classList.add('open');
             panel.setAttribute('aria-hidden', 'false');
             backdrop.classList.add('open');
             document.body.classList.add('timeclock-popup-open');
             panel.focus();
+        };
+        var clearFocusDecorations = function () {
+            document.querySelectorAll('.timeclock-focus-target').forEach(function (el) {
+                el.classList.remove('timeclock-focus-target');
+            });
+            document.querySelectorAll('.timeclock-task-row.is-dimmed').forEach(function (el) {
+                el.classList.remove('is-dimmed');
+            });
+        };
+        var applyPanelFocus = function (focusKey) {
+            clearFocusDecorations();
+            var focus = String(focusKey || '').trim();
+            if (!focus) return;
+            var target = null;
+            if (focus === 'open_shifts') target = document.getElementById('tc_live_open_shifts');
+            if (focus === 'missed_clockins') target = document.getElementById('tc_admin_missed_clockins');
+            if (focus === 'pending_approvals') target = document.getElementById('tc_admin_pending_edit_requests');
+            if (focus === 'task_reports') target = document.getElementById('tc_task_report_panel');
+            if (focus === 'missed_tasks') {
+                target = document.getElementById('tc_tasks_table_wrap');
+                var taskRows = document.querySelectorAll('.timeclock-task-row');
+                taskRows.forEach(function (row) {
+                    var state = String(row.getAttribute('data-task-state') || '').toLowerCase();
+                    if (state !== 'missed') row.classList.add('is-dimmed');
+                });
+            }
+            if (!target) return;
+            target.classList.add('timeclock-focus-target');
+            try {
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } catch (e) {
+                target.scrollIntoView();
+            }
         };
 
         var closeAll = function () {
@@ -2591,42 +3623,283 @@ include 'includes/header.php';
         };
 
         launcherButtons.forEach(function (btn) {
-            btn.addEventListener('click', function () {
+            btn.addEventListener('click', function (e) {
                 var target = btn.getAttribute('data-target');
-                if (target) openPanel(target);
+                var focus = btn.getAttribute('data-focus') || '';
+                var href = String(btn.getAttribute('href') || '');
+                if (btn.tagName === 'A' && href && href.charAt(0) !== '#') return;
+                if (target) {
+                    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+                    openPanel(target);
+                    if (focus) applyPanelFocus(focus);
+                }
             });
         });
         backdrop.addEventListener('click', closeAll);
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') closeAll();
         });
-        var initialPanel = <?php
-            $panelParam = (string)($_GET['panel'] ?? '');
-            if ($panelParam === '' && $isTimeclockAction && !$isKioskMode) {
-                $panelParam = (string)$timeClockDefaultPanel;
+        var initialPanel = <?php echo json_encode((string)$resolvedPanel); ?>;
+        var initialFocus = <?php echo json_encode((string)($_GET['focus'] ?? '')); ?>;
+        if (initialPanel) {
+            var initialPanelEl = document.getElementById(initialPanel);
+            if (initialPanelEl && initialPanelEl.classList.contains('timeclock-inline-section')) {
+                try {
+                    initialPanelEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                } catch (e) {
+                    initialPanelEl.scrollIntoView();
+                }
+                if (initialFocus) applyPanelFocus(initialFocus);
+            } else if (/^tc_panel_/.test(initialPanel)) {
+                openPanel(initialPanel);
+                if (initialFocus) applyPanelFocus(initialFocus);
             }
-            echo json_encode($panelParam);
-        ?>;
-        if (initialPanel && /^tc_panel_/.test(initialPanel)) {
-            openPanel(initialPanel);
         }
+    })();
+    (function () {
+        var schedulePanel = document.getElementById('tc_panel_schedule');
+        var openBtn = document.getElementById('tc_schedule_fullscreen_btn');
+        var exitBtn = document.getElementById('tc_schedule_exit_fullscreen_btn');
+        if (!schedulePanel || !openBtn || !exitBtn) return;
+
+        var setButtonState = function () {
+            var isNativeFull = !!document.fullscreenElement;
+            var isPseudoFull = schedulePanel.classList.contains('is-pseudo-fullscreen');
+            var inFull = isNativeFull || isPseudoFull;
+            openBtn.hidden = inFull;
+            exitBtn.hidden = !inFull;
+        };
+
+        var enterPseudoFullscreen = function () {
+            schedulePanel.classList.add('is-pseudo-fullscreen');
+            document.body.classList.add('timeclock-popup-open');
+            setButtonState();
+        };
+
+        var exitPseudoFullscreen = function () {
+            schedulePanel.classList.remove('is-pseudo-fullscreen');
+            if (!document.fullscreenElement) {
+                document.body.classList.remove('timeclock-popup-open');
+            }
+            setButtonState();
+        };
+
+        openBtn.addEventListener('click', function () {
+            if (schedulePanel.requestFullscreen) {
+                schedulePanel.requestFullscreen().then(setButtonState).catch(enterPseudoFullscreen);
+                return;
+            }
+            enterPseudoFullscreen();
+        });
+
+        exitBtn.addEventListener('click', function () {
+            if (document.fullscreenElement && document.exitFullscreen) {
+                document.exitFullscreen().then(setButtonState).catch(exitPseudoFullscreen);
+                return;
+            }
+            exitPseudoFullscreen();
+        });
+
+        document.addEventListener('fullscreenchange', function () {
+            if (!document.fullscreenElement) {
+                schedulePanel.classList.remove('is-pseudo-fullscreen');
+                document.body.classList.remove('timeclock-popup-open');
+            }
+            setButtonState();
+        });
+        setButtonState();
     })();
     (function () {
         var shiftEl = document.getElementById('tc_task_shift_id');
         var assigneeEl = document.getElementById('tc_task_assignee');
-        if (!shiftEl || !assigneeEl) return;
-        shiftEl.addEventListener('change', function () {
-            var selected = shiftEl.options[shiftEl.selectedIndex];
-            if (!selected) return;
-            var employeeId = selected.getAttribute('data-employee-id') || '';
-            if (employeeId && !assigneeEl.value) {
-                assigneeEl.value = employeeId;
+        var typeEl = document.getElementById('tc_task_type');
+        var dueWrapEl = document.getElementById('tc_task_due_wrap');
+        var dueDateEl = document.getElementById('tc_task_due_date');
+        var dateEl = document.getElementById('tc_task_date');
+        var audienceEl = document.getElementById('tc_task_audience');
+        var taskRoleWrapEl = document.getElementById('tc_task_assigned_role_wrap');
+        var taskRoleInputEl = document.getElementById('tc_task_assigned_role_name');
+        var templateAudienceEl = document.getElementById('tc_tpl_audience');
+        var templateAssigneeWrapEl = document.getElementById('tc_tpl_assignee_wrap');
+        var templateAssigneeEl = document.getElementById('tc_tpl_assigned_employee_id');
+        var templateRoleWrapEl = document.getElementById('tc_tpl_role_wrap');
+        var templateRoleInputEl = document.getElementById('tc_tpl_assigned_role_name');
+        var templateTaskTypeEl = document.getElementById('tc_tpl_task_type');
+        var templateDueOffsetWrapEl = document.getElementById('tc_tpl_due_offset_wrap');
+        var templateDueOffsetEl = document.getElementById('tc_tpl_due_offset_days');
+        var templateRecurrenceEl = document.getElementById('tc_tpl_recurrence_type');
+        var templateDaysWrapEl = document.getElementById('tc_tpl_days_wrap');
+        var templateDaysInputEl = document.getElementById('tc_tpl_recurrence_days');
+        if (shiftEl && assigneeEl) {
+            shiftEl.addEventListener('change', function () {
+                var selected = shiftEl.options[shiftEl.selectedIndex];
+                if (!selected) return;
+                var employeeId = selected.getAttribute('data-employee-id') || '';
+                if (employeeId && !assigneeEl.value) {
+                    assigneeEl.value = employeeId;
+                }
+            });
+        }
+        var syncTaskTypeUi = function () {
+            if (!typeEl || !dueWrapEl) return;
+            var oneOff = String(typeEl.value || '') === 'ONE_OFF';
+            dueWrapEl.style.display = oneOff ? '' : 'none';
+            if (!dueDateEl) return;
+            if (oneOff) {
+                dueDateEl.required = true;
+                if (!dueDateEl.value && dateEl && dateEl.value) dueDateEl.value = dateEl.value;
+            } else {
+                dueDateEl.required = false;
             }
-        });
+        };
+        var syncTaskAudienceUi = function () {
+            if (!audienceEl) return;
+            var audience = String(audienceEl.value || '');
+            var requiresAssignee = audience === 'ASSIGNED_EMPLOYEE';
+            var requiresRole = audience === 'ASSIGNED_ROLE';
+            if (assigneeEl) {
+                assigneeEl.required = requiresAssignee;
+                if (!requiresAssignee) {
+                    assigneeEl.value = '';
+                }
+            }
+            if (taskRoleWrapEl) taskRoleWrapEl.style.display = requiresRole ? '' : 'none';
+            if (taskRoleInputEl) {
+                taskRoleInputEl.required = requiresRole;
+                if (!requiresRole) taskRoleInputEl.value = '';
+            }
+        };
+        var syncTemplateAudienceUi = function () {
+            if (!templateAudienceEl) return;
+            var audience = String(templateAudienceEl.value || '');
+            var requiresAssignee = audience === 'ASSIGNED_EMPLOYEE';
+            var requiresRole = audience === 'ASSIGNED_ROLE';
+            if (templateAssigneeWrapEl) templateAssigneeWrapEl.style.display = requiresAssignee ? '' : 'none';
+            if (templateAssigneeEl) {
+                templateAssigneeEl.required = requiresAssignee;
+                if (!requiresAssignee) templateAssigneeEl.value = '';
+            }
+            if (templateRoleWrapEl) templateRoleWrapEl.style.display = requiresRole ? '' : 'none';
+            if (templateRoleInputEl) {
+                templateRoleInputEl.required = requiresRole;
+                if (!requiresRole) templateRoleInputEl.value = '';
+            }
+        };
+        var syncTemplateTaskTypeUi = function () {
+            if (!templateTaskTypeEl || !templateDueOffsetWrapEl) return;
+            var oneOff = String(templateTaskTypeEl.value || '') === 'ONE_OFF';
+            templateDueOffsetWrapEl.style.display = oneOff ? '' : 'none';
+            if (templateDueOffsetEl) {
+                templateDueOffsetEl.required = oneOff;
+                if (!oneOff) templateDueOffsetEl.value = '0';
+            }
+        };
+        var syncTemplateRecurrenceUi = function () {
+            if (!templateRecurrenceEl || !templateDaysWrapEl) return;
+            var selected = String(templateRecurrenceEl.value || '');
+            var selectedDays = selected === 'WEEKLY_SELECTED';
+            templateDaysWrapEl.style.display = selectedDays ? '' : 'none';
+            if (templateDaysInputEl) {
+                templateDaysInputEl.required = selectedDays;
+                if (!selectedDays) templateDaysInputEl.value = '';
+            }
+        };
+        if (typeEl) typeEl.addEventListener('change', syncTaskTypeUi);
+        if (audienceEl) audienceEl.addEventListener('change', syncTaskAudienceUi);
+        if (templateAudienceEl) templateAudienceEl.addEventListener('change', syncTemplateAudienceUi);
+        if (templateTaskTypeEl) templateTaskTypeEl.addEventListener('change', syncTemplateTaskTypeUi);
+        if (templateRecurrenceEl) templateRecurrenceEl.addEventListener('change', syncTemplateRecurrenceUi);
+        if (dateEl) {
+            dateEl.addEventListener('change', function () {
+                if (typeEl && String(typeEl.value || '') === 'ONE_OFF' && dueDateEl && !dueDateEl.value) {
+                    dueDateEl.value = dateEl.value || '';
+                }
+            });
+        }
+        syncTaskTypeUi();
+        syncTaskAudienceUi();
+        syncTemplateAudienceUi();
+        syncTemplateTaskTypeUi();
+        syncTemplateRecurrenceUi();
     })();
     (function () {
         var form = document.getElementById('timeclock-punch-form');
         if (!form) return;
+        var employeeSelect = document.getElementById('tc_employee_id');
+        var clockInBtn = form.querySelector('button[name="punch_type"][value="in"]');
+        var clockOutBtn = form.querySelector('button[name="punch_type"][value="out"]');
+        var statusCardEl = document.getElementById('tc_punch_feedback');
+        var resultCardEl = document.getElementById('tc_punch_result');
+        var openShiftEl = document.getElementById('tc_open_shift_data');
+        var parseJsonArray = function (raw) {
+            try {
+                var parsed = JSON.parse(String(raw || '[]'));
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (e) {
+                return [];
+            }
+        };
+        var openShifts = parseJsonArray(openShiftEl ? openShiftEl.value : '[]');
+        var setCard = function (el, tone, title, detail) {
+            if (!el) return;
+            el.className = 'timeclock-punch-feedback';
+            if (tone === 'ok') el.classList.add('is-ok');
+            if (tone === 'warn') el.classList.add('is-warn');
+            if (tone === 'error') el.classList.add('is-error');
+            el.innerHTML = '<strong>' + String(title || '') + '</strong><span>' + String(detail || '') + '</span>';
+            el.hidden = false;
+        };
+        var renderPunchStatus = function () {
+            if (!employeeSelect) return;
+            var employeeId = parseInt(employeeSelect.value || '0', 10);
+            var setButtonState = function (isIn, isOut) {
+                if (clockInBtn) {
+                    clockInBtn.disabled = !!isIn;
+                    clockInBtn.classList.toggle('is-context-active', !isIn);
+                }
+                if (clockOutBtn) {
+                    clockOutBtn.disabled = !!isOut;
+                    clockOutBtn.classList.toggle('is-context-active', !isOut);
+                }
+            };
+            if (!Number.isFinite(employeeId) || employeeId <= 0) {
+                if (statusCardEl) setCard(statusCardEl, 'warn', 'Choose an employee', 'Select a name to see current punch status.');
+                setButtonState(false, true);
+                return;
+            }
+            var openShift = openShifts.find(function (row) {
+                return parseInt(row.employee_id || '0', 10) === employeeId;
+            }) || null;
+            if (openShift) {
+                setButtonState(true, false);
+                if (statusCardEl) {
+                    setCard(
+                        statusCardEl,
+                        'ok',
+                        'Currently CLOCKED IN',
+                        'Clocked in at ' + String(openShift.clock_in_local || 'unknown time') + '. Use Clock Out when shift ends.'
+                    );
+                }
+            } else {
+                setButtonState(false, true);
+                if (statusCardEl) setCard(statusCardEl, 'warn', 'Currently CLOCKED OUT', 'No open shift found. Use Clock In to start a shift.');
+            }
+        };
+        var flashSuccess = <?php echo json_encode((string)($successMessage ?? '')); ?>;
+        var flashError = <?php echo json_encode((string)($errorMessage ?? '')); ?>;
+        if (resultCardEl) {
+            if (flashSuccess && /clock|punch/i.test(flashSuccess)) {
+                setCard(resultCardEl, 'ok', 'Punch recorded', flashSuccess);
+            } else if (flashError && /clock|punch|pin|employee/i.test(flashError)) {
+                setCard(resultCardEl, 'error', 'Punch failed', flashError);
+            } else {
+                resultCardEl.hidden = true;
+            }
+        }
+        if (employeeSelect) {
+            employeeSelect.addEventListener('change', renderPunchStatus);
+        }
+        renderPunchStatus();
         var statusEl = document.getElementById('tc_geo_status');
         var setStatus = function (msg) {
             if (statusEl) statusEl.textContent = msg;
@@ -3641,7 +4914,8 @@ include 'includes/header.php';
         var managerDayTbody = document.getElementById('tc_manager_day_tbody');
         var todayEl = document.getElementById('tc_staff_calendar_today');
         var anchorEl = document.getElementById('tc_staff_calendar_anchor');
-        if (!scheduleDataEl || !employeeEl || !modeEl || !dateEl || !titleEl || !gridEl || !managerDayEl || !managerDayTbody) return;
+        if (!scheduleDataEl || !employeeEl || !modeEl || !dateEl || !titleEl || !gridEl) return;
+        var hasManagerDayBoard = !!(managerDayEl && managerDayTbody);
 
         var parseJsonArray = function (el) {
             try {
@@ -3711,6 +4985,7 @@ include 'includes/header.php';
             return startYmd <= targetYmd && endYmd >= targetYmd;
         };
         var firstEmployeeWithRows = function () {
+            if (!employeeEl.options || typeof employeeEl.options.length !== 'number') return '';
             for (var i = 0; i < employeeEl.options.length; i++) {
                 var opt = employeeEl.options[i];
                 var id = parseInt(opt.value || '0', 10);
@@ -3733,8 +5008,13 @@ include 'includes/header.php';
             var mode = (modeEl.value === 'month') ? 'month' : 'week';
             var anchor = parseYmd(dateEl.value || anchorYmd || todayYmd);
             if (!anchor || !Number.isFinite(empId) || empId <= 0) {
-                titleEl.textContent = 'Choose an employee to view calendar.';
-                gridEl.innerHTML = '<div class="timeclock-muted">Select an employee to load calendar details.</div>';
+                if (employeeEl.getAttribute('data-locked-self') === '1') {
+                    titleEl.textContent = 'No linked employee account.';
+                    gridEl.innerHTML = '<div class="timeclock-muted">Your session is not linked to an employee record. Use Switch to link an employee profile.</div>';
+                } else {
+                    titleEl.textContent = 'Choose an employee to view calendar.';
+                    gridEl.innerHTML = '<div class="timeclock-muted">Select an employee to load calendar details.</div>';
+                }
                 return;
             }
 
@@ -3806,6 +5086,7 @@ include 'includes/header.php';
         };
 
         var renderManagerDayBoard = function () {
+            if (!hasManagerDayBoard) return;
             var targetYmd = managerDayEl.value || todayYmd;
             if (!/^\d{4}-\d{2}-\d{2}$/.test(String(targetYmd || ''))) {
                 managerDayTbody.innerHTML = '<tr><td colspan="4" class="timeclock-muted">Pick a valid day.</td></tr>';
@@ -3906,19 +5187,21 @@ include 'includes/header.php';
             renderCalendar();
         };
 
-        if (!managerDayEl.value) managerDayEl.value = todayYmd;
+        if (hasManagerDayBoard && !managerDayEl.value) managerDayEl.value = todayYmd;
         [employeeEl, modeEl, dateEl].forEach(function (el) {
             el.addEventListener('change', renderCalendar);
             el.addEventListener('input', renderCalendar);
         });
-        managerDayEl.addEventListener('change', renderManagerDayBoard);
-        managerDayEl.addEventListener('input', renderManagerDayBoard);
+        if (hasManagerDayBoard) {
+            managerDayEl.addEventListener('change', renderManagerDayBoard);
+            managerDayEl.addEventListener('input', renderManagerDayBoard);
+        }
         if (prevBtn) prevBtn.addEventListener('click', function () { shiftRangeByStep(-1); });
         if (nextBtn) nextBtn.addEventListener('click', function () { shiftRangeByStep(1); });
         if (todayBtn) {
             todayBtn.addEventListener('click', function () {
                 dateEl.value = todayYmd;
-                managerDayEl.value = todayYmd;
+                if (hasManagerDayBoard) managerDayEl.value = todayYmd;
                 renderCalendar();
                 renderManagerDayBoard();
             });
@@ -4003,7 +5286,7 @@ include 'includes/header.php';
                 <?php else: ?>
                     <?php foreach ($historicalKpis as $kpi): ?>
                         <tr>
-                            <td><?php echo htmlspecialchars($kpi['entry_date']); ?></td>
+                            <td><?php echo htmlspecialchars(formatDateForUser($kpi['entry_date'])); ?></td>
                             <td><?php echo htmlspecialchars($kpi['store_name']); ?></td>
                             <td><?php echo formatCurrency($kpi['sales_today']); ?></td>
                             <td><?php echo formatCurrency($kpi['cogs_today']); ?></td>
@@ -4161,7 +5444,9 @@ include 'includes/header.php';
         document.body.classList.toggle('high-contrast', enabled);
         buttons.forEach(function (btn) {
             btn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-            btn.textContent = enabled ? 'High Contrast: On' : 'High Contrast: Off';
+            var label = enabled ? 'Contrast: On' : 'Contrast: Off';
+            btn.setAttribute('aria-label', label);
+            btn.setAttribute('title', label);
         });
     };
     var enabled = false;
@@ -4188,7 +5473,9 @@ include 'includes/header.php';
         document.documentElement.classList.toggle('density-compact', compact);
         buttons.forEach(function (btn) {
             btn.setAttribute('aria-pressed', compact ? 'true' : 'false');
-            btn.textContent = compact ? 'Density: Compact' : 'Density: Comfortable';
+            var label = compact ? 'Density: Compact' : 'Density: Comfortable';
+            btn.setAttribute('aria-label', label);
+            btn.setAttribute('title', label);
         });
     };
     var compact = false;
@@ -4204,6 +5491,158 @@ include 'includes/header.php';
                 localStorage.setItem(KEY, compact ? '1' : '0');
             } catch (e) {}
         });
+    });
+})();
+
+(function () {
+    var KEY = 'ui_context_help_enabled';
+    var LEGACY_KEY = 'ui_nav_help_enabled';
+    var buttons = document.querySelectorAll('[data-context-help-toggle="1"]');
+    if (!buttons.length) return;
+    var applyState = function (enabled) {
+        document.documentElement.classList.toggle('context-help-enabled', enabled);
+        document.querySelectorAll('[title]').forEach(function (el) {
+            var txt = String(el.getAttribute('title') || '').trim();
+            if (!txt) return;
+            if (!el.hasAttribute('data-context-help-title')) {
+                el.setAttribute('data-context-help-title', txt);
+            }
+        });
+        if (enabled) {
+            document.querySelectorAll('[data-context-help-title]').forEach(function (el) {
+                var txt = String(el.getAttribute('data-context-help-title') || '').trim();
+                if (txt) el.setAttribute('title', txt);
+            });
+        } else {
+            document.querySelectorAll('[data-context-help-title]').forEach(function (el) {
+                el.removeAttribute('title');
+            });
+        }
+        buttons.forEach(function (btn) {
+            btn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+            var label = enabled ? 'Context Help: On' : 'Context Help: Off';
+            btn.setAttribute('aria-label', label);
+            btn.setAttribute('title', label);
+        });
+    };
+    var enabled = true;
+    try {
+        var raw = localStorage.getItem(KEY);
+        if (raw === null) {
+            var legacyRaw = localStorage.getItem(LEGACY_KEY);
+            if (legacyRaw !== null) raw = legacyRaw;
+        }
+        if (raw !== null) enabled = raw === '1';
+    } catch (e) {}
+    applyState(enabled);
+    buttons.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            enabled = !enabled;
+            applyState(enabled);
+            try {
+                localStorage.setItem(KEY, enabled ? '1' : '0');
+                localStorage.removeItem(LEGACY_KEY);
+            } catch (e) {}
+        });
+    });
+})();
+
+(function () {
+    var form = document.getElementById('spreadsheet-form');
+    if (!form) return;
+    var saveBar = document.getElementById('kpi_inline_savebar');
+    var editableInputs = Array.prototype.slice.call(form.querySelectorAll('.spreadsheet-input:not([readonly])'));
+    if (!editableInputs.length) return;
+
+    var isDirty = false;
+    var dirtyRows = {};
+    var suppressUnloadGuard = false;
+    var gridIndex = {};
+
+    editableInputs.forEach(function (input) {
+        var r = String(input.getAttribute('data-row') || '');
+        var c = String(input.getAttribute('data-col') || '');
+        if (r !== '' && c !== '') {
+            gridIndex[r + ':' + c] = input;
+        }
+    });
+
+    var setSaveBar = function (state, text) {
+        if (!saveBar) return;
+        saveBar.setAttribute('data-save-state', state);
+        saveBar.textContent = text;
+    };
+
+    var renderRowStatus = function (rowKey) {
+        var badge = document.querySelector('[data-row-save-status="' + String(rowKey) + '"]');
+        if (!badge) return;
+        if (dirtyRows[rowKey]) {
+            badge.textContent = 'Edited';
+            badge.classList.add('is-dirty');
+        } else {
+            badge.textContent = 'Saved';
+            badge.classList.remove('is-dirty');
+        }
+    };
+
+    var markDirty = function (input) {
+        isDirty = true;
+        input.classList.add('is-dirty');
+        var rowKey = String(input.getAttribute('data-row') || '');
+        if (rowKey !== '') {
+            dirtyRows[rowKey] = true;
+            renderRowStatus(rowKey);
+        }
+        setSaveBar('dirty', 'Pending changes');
+    };
+
+    editableInputs.forEach(function (input) {
+        input.addEventListener('input', function () {
+            markDirty(input);
+        });
+        input.addEventListener('change', function () {
+            markDirty(input);
+        });
+        input.addEventListener('keydown', function (e) {
+            var key = String(e.key || '');
+            if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'ArrowUp' && key !== 'ArrowDown' && key !== 'Enter') {
+                return;
+            }
+            var row = parseInt(input.getAttribute('data-row') || '', 10);
+            var col = parseInt(input.getAttribute('data-col') || '', 10);
+            if (isNaN(row) || isNaN(col)) return;
+            var nextRow = row;
+            var nextCol = col;
+            if (key === 'ArrowLeft') nextCol = col - 1;
+            if (key === 'ArrowRight') nextCol = col + 1;
+            if (key === 'ArrowUp') nextRow = row - 1;
+            if (key === 'ArrowDown' || key === 'Enter') nextRow = row + 1;
+            var target = gridIndex[String(nextRow) + ':' + String(nextCol)];
+            if (!target) return;
+            e.preventDefault();
+            target.focus();
+            try { target.select(); } catch (err) {}
+        });
+    });
+
+    form.addEventListener('submit', function () {
+        suppressUnloadGuard = true;
+        isDirty = false;
+        dirtyRows = {};
+        editableInputs.forEach(function (input) {
+            input.classList.remove('is-dirty');
+        });
+        document.querySelectorAll('[data-row-save-status]').forEach(function (badge) {
+            badge.textContent = 'Saved';
+            badge.classList.remove('is-dirty');
+        });
+        setSaveBar('saving', 'Saving changes...');
+    });
+
+    window.addEventListener('beforeunload', function (e) {
+        if (!isDirty || suppressUnloadGuard) return;
+        e.preventDefault();
+        e.returnValue = '';
     });
 })();
 </script>
