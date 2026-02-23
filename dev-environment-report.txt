@@ -1,0 +1,55 @@
+==========================================
+  Artisan Den – Environment Check
+  (WSL / Ubuntu / PostgreSQL)
+==========================================
+
+--- Environment ---
+  OS:        Linux
+  WSL:       yes
+  uname:     Linux ArthurLaptop 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025 x86_64
+
+--- PHP ---
+  Version:  8.3.6 (min 8.1.0)
+  SAPI:     cli
+  Status:   OK
+
+--- Extensions ---
+  ✓ pdo: loaded
+  ✓ pdo_pgsql: loaded
+  ✓ json: loaded
+  ✓ mbstring: loaded
+  ✓ session: loaded
+  ✓ curl: loaded
+  ✓ openssl: loaded
+
+--- Paths ---
+  Script:   /home/arthur/artisan_den/check-environment.php
+  CWD:      /home/arthur/artisan_den
+  Doc root: (cli)
+
+--- Database ---
+  Config:   found
+  Connect:  OK
+  Host:     localhost
+  DB name:  artisan_den
+  PostgreSQL: 16.11
+  Tables:
+    ✓ stores
+    ✓ daily_kpis
+    ✓ users
+    ✓ products
+    ✓ vendors
+    ✓ inventory
+    ✓ orders
+
+--- Key files ---
+  ✓ config.php
+  ✓ index.php
+  ✓ includes/helpers.php
+  ✓ includes/functions.php
+  ✓ includes/inventory-functions.php
+  ✓ includes/post-handlers.php
+
+✅ Environment check PASSED
+
+Run on server and diff with this file to compare environments.
