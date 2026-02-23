@@ -192,6 +192,18 @@ if (isset($_POST['timeclock_schedule_dragdrop_json'])) {
         exit;
     }
 
+    if ($operation === 'split') {
+        $shiftId = intval($_POST['shift_id'] ?? 0);
+        $splitUtc = $toUtcFromLocal($_POST['split_local'] ?? '');
+        $result = splitScheduleShift($shiftId, $storeIdTc, $splitUtc ?: '', $managerName);
+        echo json_encode([
+            'success' => !empty($result['success']),
+            'new_shift_id' => (int)($result['new_shift_id'] ?? 0),
+            'message' => (string)($result['message'] ?? 'Unable to split shift.')
+        ]);
+        exit;
+    }
+
     if ($operation === 'publish_week') {
         $weekStart = trim((string)($_POST['week_start_date'] ?? ''));
         $weekEnd = trim((string)($_POST['week_end_date'] ?? ''));
@@ -222,6 +234,59 @@ if (isset($_POST['timeclock_schedule_dragdrop_json'])) {
     }
 
     echo json_encode(['success' => false, 'message' => 'Unsupported schedule operation.']);
+    exit;
+}
+
+if (isset($_POST['timeclock_user_create'])) {
+    if (!currentUserCan('timeclock_manager')) {
+        $denyAccess('Manager role required to manage employees.', 'timeclock');
+    }
+    $storeIdTc = intval($_POST['store_id'] ?? 0);
+    $dateParam = (string)($_POST['date'] ?? $date);
+    $managerName = trim((string)($_POST['manager_name'] ?? $currentUserName ?? 'manager'));
+    $hourlyRateRaw = trim((string)($_POST['hourly_rate'] ?? '0'));
+    $hourlyRateCents = max(0, (int)round(((float)$hourlyRateRaw) * 100));
+    $payload = [
+        'full_name' => trim((string)($_POST['full_name'] ?? '')),
+        'role_name' => trim((string)($_POST['role_name'] ?? 'Employee')),
+        'pin' => trim((string)($_POST['pin'] ?? '')),
+        'hourly_rate_cents' => $hourlyRateCents,
+        'is_active' => !empty($_POST['is_active']),
+        'location_store_ids' => (array)($_POST['location_store_ids'] ?? []),
+    ];
+    $res = createTimeclockEmployeeWithLocations($payload, $managerName !== '' ? $managerName : 'manager');
+    if (!empty($res['success'])) {
+        header("Location: index.php?action=manager_dashboard&store={$storeIdTc}&date={$dateParam}&panel=tc_panel_users&success=" . urlencode($res['message'] ?? 'Employee created.'));
+    } else {
+        header("Location: index.php?action=manager_dashboard&store={$storeIdTc}&date={$dateParam}&panel=tc_panel_users&error=" . urlencode($res['message'] ?? 'Failed to create employee.'));
+    }
+    exit;
+}
+
+if (isset($_POST['timeclock_user_update'])) {
+    if (!currentUserCan('timeclock_manager')) {
+        $denyAccess('Manager role required to manage employees.', 'timeclock');
+    }
+    $storeIdTc = intval($_POST['store_id'] ?? 0);
+    $dateParam = (string)($_POST['date'] ?? $date);
+    $employeeIdTc = intval($_POST['employee_id'] ?? 0);
+    $managerName = trim((string)($_POST['manager_name'] ?? $currentUserName ?? 'manager'));
+    $hourlyRateRaw = trim((string)($_POST['hourly_rate'] ?? '0'));
+    $hourlyRateCents = max(0, (int)round(((float)$hourlyRateRaw) * 100));
+    $payload = [
+        'full_name' => trim((string)($_POST['full_name'] ?? '')),
+        'role_name' => trim((string)($_POST['role_name'] ?? 'Employee')),
+        'pin' => trim((string)($_POST['pin'] ?? '')),
+        'hourly_rate_cents' => $hourlyRateCents,
+        'is_active' => !empty($_POST['is_active']),
+        'location_store_ids' => (array)($_POST['location_store_ids'] ?? []),
+    ];
+    $res = updateTimeclockEmployeeWithLocations($employeeIdTc, $payload, $managerName !== '' ? $managerName : 'manager');
+    if (!empty($res['success'])) {
+        header("Location: index.php?action=manager_dashboard&store={$storeIdTc}&date={$dateParam}&panel=tc_panel_users&success=" . urlencode($res['message'] ?? 'Employee updated.'));
+    } else {
+        header("Location: index.php?action=manager_dashboard&store={$storeIdTc}&date={$dateParam}&panel=tc_panel_users&error=" . urlencode($res['message'] ?? 'Failed to update employee.'));
+    }
     exit;
 }
 

@@ -32,22 +32,7 @@ $invColspan = 17 + (2 * count($otherDates));
 <div class="inventory-section">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
         <h3>Inventory & Reorder List</h3>
-        <div class="inventory-tip-box" style="font-size: 12px; color: #000; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; max-width: 500px;">
-            <div style="margin-bottom: 5px;">
-                💡 <strong>Daily:</strong> <strong>Sales</strong> = sales made that date. <strong>On Hand</strong> = qty left after subtracting sales (chain: each day uses the previous day&apos;s On Hand − today&apos;s sales; first day uses your product&apos;s current qty). Enter a sale and tab out — the page will recalc and reload so On Hand updates.
-            </div>
-            <div style="font-size: 11px; color: #000 !important; border-top: 1px solid #ddd; padding-top: 5px; margin-top: 5px;">
-                <strong>Substitution Logic:</strong> When a product is OUT or unavailable, the system can suggest ordering a substitution product instead. Set this in the Edit Inventory modal. The substitution product should be a similar item that can temporarily replace the primary product when it's unavailable.
-            </div>
-            <div style="font-size: 11px; color: #000 !important; border-top: 1px solid #ddd; padding-top: 5px; margin-top: 5px;">
-                <strong>Vendor rating:</strong> When adding a vendor, choose 1–5 stars in the form. To change a rating, click the vendor name under “Edit vendor” above, then update the rating dropdown and save.
-            </div>
-            <?php if (false): // Deferred post-Launch-1: POS integration lives outside locked scope ?>
-            <div style="font-size: 11px; margin-top: 5px;">
-                💡 <a href="#" onclick="alert('POS integration is deferred until after Launch 1 scope is complete.'); return false;">Connect Lightspeed POS</a> for automatic inventory sync
-            </div>
-            <?php endif; ?>
-        </div>
+        
     </div>
     <div class="inventory-table-wrapper">
         <table class="inventory-table">
@@ -58,27 +43,27 @@ $invColspan = 17 + (2 * count($otherDates));
                         <th class="inventory-date-col" colspan="2"><small><?php echo $dateObj->format('D m/d/y'); ?></small></th>
                     <?php endforeach; ?>
                     <th>Status</th>
-                    <th>7-Day Avg Sales</th>
-                    <th>30-Day Avg Sales</th>
-                    <th>Days of Stock</th>
+                    <th>7-Day<br>Avg Sales</th>
+                    <th>30-Day<br>Avg Sales</th>
+                    <th>Days of<br>Stock</th>
                     <th>ROP<br><small>(7-day)</small></th>
                     <th>Target (Max)<br><small>(7-day)</small></th>
                     <th>Suggested Order<br><small>(7-day)</small></th>
-                    <th>Qty Ordered</th>
+                    <th>Qty<br>Ordered</th>
                     <th>Received</th>
                     <th>Vendor</th>
-                    <th>Vendor Rating</th>
+                    <th data-nav-help="Vendor rating: choose 1-5 stars when adding a vendor. To update a rating later, use Edit Vendor in the top controls, then save.">Vendor<br>Rating</th>
                     <th>Unit Cost<br><small>(Price)</small></th>
-                    <th>Est Total</th>
-                    <th>Substitution</th>
+                    <th>Est<br>Total</th>
+                    <th data-nav-help="Substitution logic: if a product is OUT or unavailable, the system can suggest the substitution product instead. Configure this in Edit Inventory.">Substitution</th>
                     <th>Action</th>
                     <th>Notes</th>
                 </tr>
                 <tr>
                     <th></th>
                     <?php foreach ($otherDates as $d): ?>
-                        <th class="inventory-date-col"><small>Sales</small></th>
-                        <th class="inventory-date-col"><small>On Hand</small></th>
+                        <th class="inventory-date-col" data-nav-help="Daily Sales: units sold on this date. Enter sales and tab out to recalculate."><small>Sales</small></th>
+                        <th class="inventory-date-col" data-nav-help="On Hand: remaining quantity after subtracting sales from the previous day&apos;s On Hand."><small>On Hand</small></th>
                     <?php endforeach; ?>
                     <?php for ($i = 0; $i < 16; $i++): ?><th></th><?php endfor; ?>
                 </tr>
@@ -189,9 +174,9 @@ $invColspan = 17 + (2 * count($otherDates));
                             </td>
                             <td class="btn-cell">
                                 <?php if ($pendingOrder): 
-                                    $orderDateStr = !empty($pendingOrder['order_date']) ? date('M j', strtotime($pendingOrder['order_date'])) : '';
+                                    $orderDateStr = !empty($pendingOrder['order_date']) ? formatDateForUser($pendingOrder['order_date']) : '';
                                 ?>
-                                    <span style="font-size: 11px; color: #f39c12;" title="Ordered on <?php echo htmlspecialchars($pendingOrder['order_date'] ?? ''); ?>">
+                                    <span style="font-size: 11px; color: #f39c12;" title="Ordered on <?php echo htmlspecialchars(formatDateForUser($pendingOrder['order_date'] ?? '')); ?>">
                                         <?php echo number_format($pendingOrder['quantity'], 0); ?><?php echo $orderDateStr ? ' <small style="color: #000;">(' . $orderDateStr . ')</small>' : ''; ?>
                                     </span>
                                 <?php else: ?>
@@ -208,9 +193,9 @@ $invColspan = 17 + (2 * count($otherDates));
                                     $expectedDate = $pendingOrder['expected_delivery_date'] ?? null;
                                     $orderId = $pendingOrder['id'] ?? null;
                                     ?>
-                                    <button type="button" class="btn-action btn-action-primary" onclick="openReceiveOrderModal(<?php echo (int)$orderId; ?>, <?php echo (int)$item['product_id']; ?>, <?php echo (int)$item['store_id']; ?>, <?php echo (int)round((float)$pendingOrder['quantity']); ?>)" title="Mark received (qty &amp; date). Exp: <?php echo $expectedDate ? htmlspecialchars($expectedDate) : 'N/A'; ?>">Rcvd</button>
+                                    <button type="button" class="btn-action btn-action-primary" onclick="openReceiveOrderModal(<?php echo (int)$orderId; ?>, <?php echo (int)$item['product_id']; ?>, <?php echo (int)$item['store_id']; ?>, <?php echo (int)round((float)$pendingOrder['quantity']); ?>)" title="Mark received (qty &amp; date). Exp: <?php echo $expectedDate ? htmlspecialchars(formatDateForUser($expectedDate)) : 'N/A'; ?>">Rcvd</button>
                                     <?php if ($expectedDate): ?>
-                                        <small style="color: #000; font-size: 10px;">Exp: <?php echo date('M j', strtotime($expectedDate)); ?></small>
+                                        <small style="color: #000; font-size: 10px;">Exp: <?php echo htmlspecialchars(formatDateForUser($expectedDate)); ?></small>
                                     <?php endif; ?>
                                 <?php else: ?>
                                     <span style="color: #999; font-size: 11px;">—</span>

@@ -94,6 +94,7 @@ try {
 
     $weeksToSeed = 4;
     $seededShiftCount = 0;
+    $seededTaskCount = 0;
     $firstWeekStartYmd = '';
     $lastWeekEndYmd = '';
     for ($w = 0; $w < $weeksToSeed; $w++) {
@@ -143,6 +144,21 @@ try {
         }
     }
 
+    // Seed a starter task list for the first seeded week date so Task List
+    // has visible content immediately after running make seed-timeclock.
+    if ($firstWeekStartYmd !== '') {
+        foreach ($stores as $store) {
+            $storeIdSeed = (int)($store['id'] ?? 0);
+            if ($storeIdSeed <= 0) {
+                continue;
+            }
+            $taskSeed = seedDemoTimeclockTasksForDate($storeIdSeed, $firstWeekStartYmd, 'Seed Script');
+            if (!empty($taskSeed['success'])) {
+                $seededTaskCount += (int)($taskSeed['inserted'] ?? 0);
+            }
+        }
+    }
+
     $pdo->commit();
 
     echo "Time Clock demo seed complete.\n";
@@ -152,6 +168,7 @@ try {
     echo " - Jordan Stock: 3333\n";
     echo "Seeded schedule range: {$firstWeekStartYmd} to {$lastWeekEndYmd}\n";
     echo "Seeded shifts: {$seededShiftCount}\n";
+    echo "Seeded tasks: {$seededTaskCount}\n";
 } catch (Throwable $e) {
     if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();

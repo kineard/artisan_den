@@ -36,7 +36,16 @@
     <script>
         (function () {
             if (!('serviceWorker' in navigator)) return;
+            var host = String(window.location.hostname || '').toLowerCase();
+            var isLocalDev = host === 'localhost' || host === '127.0.0.1';
             window.addEventListener('load', function () {
+                if (isLocalDev) {
+                    // Avoid stale JS/CSS caches while iterating quickly in local dev.
+                    navigator.serviceWorker.getRegistrations().then(function (regs) {
+                        regs.forEach(function (reg) { reg.unregister(); });
+                    }).catch(function () {});
+                    return;
+                }
                 navigator.serviceWorker.register('service-worker.js').catch(function () {});
             });
         })();
@@ -60,13 +69,24 @@
     $roleForNav = isset($currentUserRole) ? (string)$currentUserRole : getCurrentUserRole();
     $canManageNav = isset($canManageTimeclock) ? !empty($canManageTimeclock) : currentUserCan('timeclock_manager');
     $canAdminNav = isset($canAdminTimeclock) ? !empty($canAdminTimeclock) : currentUserCan('timeclock_admin');
-    $isTimeclockNavAction = in_array((string)$currentAction, ['timeclock', 'employee_dashboard', 'manager_dashboard', 'admin_dashboard'], true);
+    $isTimeclockNavAction = in_array((string)$currentAction, ['timeclock', 'employee_dashboard', 'manager_dashboard', 'schedule_center', 'admin_dashboard'], true);
+    $navPanel = (string)($_GET['panel'] ?? '');
+    $currentUserDisplay = isset($currentUserName) ? (string)$currentUserName : getCurrentUserDisplayName();
+    $currentRoleDisplay = ucfirst((string)$roleForNav);
+    $currentSessionEmployeeId = (int)($_SESSION['employee_id'] ?? ($_SESSION['user_employee_id'] ?? 0));
+    $userSwitchOptions = isset($headerUserSwitchEmployees) && is_array($headerUserSwitchEmployees)
+        ? $headerUserSwitchEmployees
+        : (($currentStoreId > 0 && function_exists('getTimeClockEmployeesForStore')) ? getTimeClockEmployeesForStore((int)$currentStoreId) : []);
+    $userSwitchQuery = $_GET;
+    unset($userSwitchQuery['switch_user'], $userSwitchQuery['switch_user_employee_id'], $userSwitchQuery['switch_user_role']);
     if ($currentAction === 'dashboard') {
         $topbarTitle = ($sidebarTab === 'inventory') ? 'Inventory' : 'KPIs';
     } elseif ($currentAction === 'employee_dashboard') {
         $topbarTitle = 'Employee Dashboard';
     } elseif ($currentAction === 'manager_dashboard') {
         $topbarTitle = 'Manager Operations';
+    } elseif ($currentAction === 'schedule_center') {
+        $topbarTitle = 'Schedule Builder';
     } elseif ($currentAction === 'admin_dashboard') {
         $topbarTitle = 'Admin Time Clock';
     } else {
@@ -84,48 +104,266 @@
                 </div>
             </div>
             <nav class="app-sidebar-nav" id="app-sidebar-nav">
-                <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?><?php echo $sidebarDaysParam; ?>&tab=kpi&mode=<?php echo urlencode($sidebarKpiMode); ?>" class="<?php echo ($currentAction === 'dashboard' && $sidebarTab === 'kpi') ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">▣</span>KPIs</a>
-                <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?><?php echo $sidebarDaysParam; ?>&tab=inventory&mode=view" class="<?php echo ($currentAction === 'dashboard' && $sidebarTab === 'inventory') ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">◫</span>Inventory</a>
-                <a href="?action=employee_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="<?php echo $currentAction === 'employee_dashboard' ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">◔</span>Employee</a>
+                <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?><?php echo $sidebarDaysParam; ?>&tab=kpi&mode=<?php echo urlencode($sidebarKpiMode); ?>" class="nav-kpi <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'kpi') ? 'active' : ''; ?>" data-nav-help="KPI performance and labor tracking."><span class="nav-ico" aria-hidden="true">▣</span>KPIs</a>
+                <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?><?php echo $sidebarDaysParam; ?>&tab=inventory&mode=view" class="nav-contrast <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'inventory') ? 'active' : ''; ?>" data-nav-help="Inventory counts, reorder, and vendors."><span class="nav-ico" aria-hidden="true">◫</span>Inventory</a>
+                <a href="?action=employee_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="nav-contrast <?php echo $currentAction === 'employee_dashboard' ? 'active' : ''; ?>" data-nav-help="Employee self-service tools and requests."><span class="nav-ico" aria-hidden="true">◔</span>Employee</a>
                 <?php if ($canManageNav): ?>
-                <a href="?action=manager_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="<?php echo in_array($currentAction, ['manager_dashboard', 'timeclock'], true) ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">◷</span>Manager Ops<?php if (!empty($timeClockNeedsAttention)): ?> <span class="nav-alert-dot" title="Needs attention"></span><?php endif; ?></a>
+                <a href="?action=manager_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="nav-contrast <?php echo in_array($currentAction, ['manager_dashboard', 'timeclock', 'schedule_center'], true) ? 'active' : ''; ?>" data-nav-help="Manager operations, approvals, and floor visibility."><span class="nav-ico" aria-hidden="true">◷</span>Manager Ops<?php if (!empty($timeClockNeedsAttention)): ?> <span class="nav-alert-dot" title="Needs attention"></span><?php endif; ?></a>
                 <?php endif; ?>
                 <?php if ($canAdminNav): ?>
-                <a href="?action=admin_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="<?php echo $currentAction === 'admin_dashboard' ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">◉</span>Admin Time</a>
+                <a href="?action=admin_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="nav-contrast <?php echo $currentAction === 'admin_dashboard' ? 'active' : ''; ?>" data-nav-help="Policy, payroll controls, and governance."><span class="nav-ico" aria-hidden="true">◉</span>Admin Time</a>
                 <?php endif; ?>
-                <a href="?action=history&store=<?php echo $currentStoreId; ?>" class="<?php echo $currentAction === 'history' ? 'active' : ''; ?>"><span class="nav-ico" aria-hidden="true">☰</span>History</a>
-                <a href="import.php"><span class="nav-ico" aria-hidden="true">⇪</span>Import</a>
+                <a href="?action=history&store=<?php echo $currentStoreId; ?>" class="nav-contrast <?php echo $currentAction === 'history' ? 'active' : ''; ?>" data-nav-help="Historical activity and reports."><span class="nav-ico" aria-hidden="true">☰</span>History</a>
+                <a href="import.php" class="nav-contrast" data-nav-help="Data import and bulk updates."><span class="nav-ico" aria-hidden="true">⇪</span>Import</a>
             </nav>
             <div class="app-sidebar-footer">
-                <span><?php echo htmlspecialchars($currentDate); ?></span>
-                <span>Store #<?php echo $currentStoreId > 0 ? $currentStoreId : 0; ?></span>
-                <button type="button" class="density-toggle" data-density-toggle="1" aria-pressed="false">Density: Comfortable</button>
-                <button type="button" class="contrast-toggle" data-contrast-toggle="1" aria-pressed="false">High Contrast: Off</button>
+                <span class="app-go-live-note">Go-live reminder: enable 60s idle timeout.</span>
             </div>
         </aside>
         <main class="app-main">
             <div class="app-topbar">
                 <button type="button" id="app-sidebar-toggle" class="app-sidebar-toggle" aria-controls="app-sidebar-nav" aria-expanded="false">Menu</button>
                 <div class="app-topbar-title"><?php echo htmlspecialchars($topbarTitle); ?><?php if ($isTimeclockNavAction && !empty($timeClockNeedsAttention)): ?> <span class="app-topbar-badge-alert">Needs Attention</span><?php endif; ?></div>
-                <button type="button" class="density-toggle" data-density-toggle="1" aria-pressed="false">Density: Comfortable</button>
-                <button type="button" class="contrast-toggle" data-contrast-toggle="1" aria-pressed="false">High Contrast: Off</button>
-            </div>
-            <div class="app-submenu">
-                <?php if ($isTimeclockNavAction): ?>
-                    <a href="?action=employee_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="app-submenu-item <?php echo $currentAction === 'employee_dashboard' ? 'active' : ''; ?>">Employee Dashboard</a>
-                    <?php if ($canManageNav): ?>
-                    <a href="?action=manager_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="app-submenu-item <?php echo in_array($currentAction, ['manager_dashboard', 'timeclock'], true) ? 'active' : ''; ?>">Manager Ops</a>
-                    <?php endif; ?>
-                    <?php if ($canAdminNav): ?>
-                    <a href="?action=admin_dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="app-submenu-item <?php echo $currentAction === 'admin_dashboard' ? 'active' : ''; ?>">Admin Time</a>
-                    <?php endif; ?>
-                    <a href="?action=timeclock&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>" class="app-submenu-item <?php echo $currentAction === 'timeclock' ? 'active' : ''; ?>">Core Time Clock</a>
-                <?php else: ?>
-                    <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=kpi&mode=view" class="app-submenu-item <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'kpi' && $sidebarKpiMode === 'view') ? 'active' : ''; ?>">KPIs View</a>
-                    <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=kpi&mode=edit" class="app-submenu-item <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'kpi' && $sidebarKpiMode === 'edit') ? 'active' : ''; ?>">KPIs Edit</a>
-                    <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=inventory&mode=view" class="app-submenu-item <?php echo ($currentAction === 'dashboard' && $sidebarTab === 'inventory') ? 'active' : ''; ?>">Inventory</a>
-                    <a href="?action=history&store=<?php echo $currentStoreId; ?>" class="app-submenu-item <?php echo $currentAction === 'history' ? 'active' : ''; ?>">History</a>
-                    <a href="import.php" class="app-submenu-item">Import</a>
+                <?php if ($currentAction !== 'dashboard'): ?>
+                <button type="button" class="density-toggle" data-density-toggle="1" aria-pressed="false" aria-label="Density: Comfortable" title="Density: Comfortable"></button>
+                <button type="button" class="contrast-toggle" data-contrast-toggle="1" aria-pressed="false" aria-label="Contrast: Off" title="Contrast: Off"></button>
                 <?php endif; ?>
             </div>
+            <?php if ($isTimeclockNavAction): ?>
+            <?php
+                $timeclockPrimaryTabs = [];
+                if ($currentAction === 'employee_dashboard') {
+                    $timeclockPrimaryTabs[] = [
+                        'label' => 'Employee Dashboard',
+                        'href' => '?action=employee_dashboard&store=' . $currentStoreId . '&date=' . urlencode($currentDate),
+                        'active' => ($currentAction === 'employee_dashboard'),
+                    ];
+                }
+                if ($canManageNav && in_array($currentAction, ['manager_dashboard', 'schedule_center', 'timeclock'], true)) {
+                    $timeclockPrimaryTabs[] = [
+                        'label' => 'Manager Ops',
+                        'href' => '?action=manager_dashboard&store=' . $currentStoreId . '&date=' . urlencode($currentDate),
+                        'active' => ($currentAction === 'manager_dashboard'),
+                    ];
+                    $timeclockPrimaryTabs[] = [
+                        'label' => 'Schedule Builder',
+                        'href' => '?action=schedule_center&store=' . $currentStoreId . '&date=' . urlencode($currentDate),
+                        'active' => ($currentAction === 'schedule_center'),
+                    ];
+                }
+                if ($canAdminNav && $currentAction === 'admin_dashboard') {
+                    $timeclockPrimaryTabs[] = [
+                        'label' => 'Admin Time',
+                        'href' => '?action=admin_dashboard&store=' . $currentStoreId . '&date=' . urlencode($currentDate),
+                        'active' => ($currentAction === 'admin_dashboard'),
+                    ];
+                }
+                $timeclockContextTabs = [];
+                if ($currentAction === 'employee_dashboard') {
+                    $timeclockContextTabs = [
+                        [
+                            'label' => 'Overview',
+                            'href' => '?action=employee_dashboard&store=' . $currentStoreId . '&date=' . urlencode($currentDate),
+                            'active' => ($navPanel === ''),
+                        ],
+                        [
+                            'label' => 'Schedule',
+                            'href' => '?action=employee_dashboard&store=' . $currentStoreId . '&date=' . urlencode($currentDate) . '&panel=tc_panel_staff_schedule',
+                            'active' => ($navPanel === 'tc_panel_staff_schedule'),
+                        ],
+                        [
+                            'label' => 'Tasks',
+                            'href' => '?action=employee_dashboard&store=' . $currentStoreId . '&date=' . urlencode($currentDate) . '&panel=tc_panel_tasks',
+                            'active' => ($navPanel === 'tc_panel_tasks'),
+                        ],
+                        [
+                            'label' => 'PTO',
+                            'href' => '?action=employee_dashboard&store=' . $currentStoreId . '&date=' . urlencode($currentDate) . '&panel=tc_panel_pto',
+                            'active' => ($navPanel === 'tc_panel_pto'),
+                        ],
+                    ];
+                } elseif ($canManageNav && in_array($currentAction, ['manager_dashboard', 'schedule_center'], true)) {
+                    $managerDashBase = '?action=manager_dashboard&store=' . $currentStoreId . '&date=' . urlencode($currentDate);
+                    $timeclockContextTabs = [
+                        [
+                            'label' => 'Overview',
+                            'href' => $managerDashBase,
+                            'active' => ($currentAction === 'manager_dashboard' && $navPanel === ''),
+                        ],
+                        [
+                            'label' => 'Schedule',
+                            'href' => '?action=schedule_center&store=' . $currentStoreId . '&date=' . urlencode($currentDate),
+                            'active' => ($currentAction === 'schedule_center'),
+                        ],
+                        [
+                            'label' => 'Tasks',
+                            'href' => $managerDashBase . '&panel=tc_panel_tasks',
+                            'active' => ($currentAction === 'manager_dashboard' && $navPanel === 'tc_panel_tasks'),
+                        ],
+                        [
+                            'label' => 'PTO',
+                            'href' => $managerDashBase . '&panel=tc_panel_pto',
+                            'active' => ($currentAction === 'manager_dashboard' && $navPanel === 'tc_panel_pto'),
+                        ],
+                        [
+                            'label' => 'Users',
+                            'href' => $managerDashBase . '&panel=tc_panel_users',
+                            'active' => ($currentAction === 'manager_dashboard' && $navPanel === 'tc_panel_users'),
+                        ],
+                        [
+                            'label' => 'Reviews',
+                            'href' => $managerDashBase . '&panel=tc_panel_mgr_reviews',
+                            'active' => ($currentAction === 'manager_dashboard' && $navPanel === 'tc_panel_mgr_reviews'),
+                        ],
+                        [
+                            'label' => 'Employee Notes',
+                            'href' => $managerDashBase . '&panel=tc_panel_mgr_notes',
+                            'active' => ($currentAction === 'manager_dashboard' && $navPanel === 'tc_panel_mgr_notes'),
+                        ],
+                    ];
+                } elseif ($currentAction === 'admin_dashboard') {
+                    $adminBase = '?action=admin_dashboard&store=' . $currentStoreId . '&date=' . urlencode($currentDate);
+                    $timeclockContextTabs = [
+                        ['label' => 'Overview', 'href' => $adminBase, 'active' => ($navPanel === '')],
+                        ['label' => 'Payroll', 'href' => $adminBase . '&panel=tc_panel_payroll', 'active' => ($navPanel === 'tc_panel_payroll')],
+                        ['label' => 'Settings', 'href' => $adminBase . '&panel=tc_panel_settings', 'active' => ($navPanel === 'tc_panel_settings')],
+                        ['label' => 'PTO Policy', 'href' => $adminBase . '&panel=tc_panel_pto', 'active' => ($navPanel === 'tc_panel_pto')],
+                        ['label' => 'Audit', 'href' => $adminBase . '&panel=tc_panel_admin', 'active' => ($navPanel === 'tc_panel_admin')],
+                        ['label' => 'Live', 'href' => $adminBase . '&panel=tc_panel_live', 'active' => ($navPanel === 'tc_panel_live')],
+                    ];
+                }
+            ?>
+            <div class="app-timeclock-session-strip">
+                <div class="app-user-banner app-user-banner-timeclock">
+                    <div class="app-timeclock-nav-stack">
+                        <div class="app-submenu app-local-tabs-kpi">
+                            <?php foreach ($timeclockPrimaryTabs as $tab): ?>
+                            <a href="<?php echo $tab['href']; ?>" class="app-submenu-item app-local-tab kpi-local-tab <?php echo !empty($tab['active']) ? 'active' : ''; ?>"><?php echo htmlspecialchars((string)$tab['label']); ?></a>
+                            <?php endforeach; ?>
+                        </div>
+                        <?php if (!empty($timeclockContextTabs)): ?>
+                        <div class="app-submenu app-submenu-context app-local-tabs-kpi">
+                            <?php foreach ($timeclockContextTabs as $tab): ?>
+                            <a href="<?php echo $tab['href']; ?>" class="app-submenu-item app-local-tab kpi-local-tab <?php echo !empty($tab['active']) ? 'active' : ''; ?>"><?php echo htmlspecialchars((string)$tab['label']); ?></a>
+                            <?php endforeach; ?>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                    <div class="app-timeclock-meta-bar">
+                        <span class="app-user-banner-sep">|</span>
+                        <strong>Logged in as:</strong>
+                        <span><?php echo htmlspecialchars($currentUserDisplay); ?></span>
+                        <span class="app-user-role"><?php echo htmlspecialchars($currentRoleDisplay); ?></span>
+                        <span class="app-user-banner-sep">|</span>
+                        <span>Store #<?php echo $currentStoreId > 0 ? $currentStoreId : 0; ?></span>
+                        <span class="app-user-banner-sep">|</span>
+                        <form method="GET" action="index.php" class="app-user-switch-form-inline">
+                            <?php foreach ($userSwitchQuery as $k => $v): ?>
+                                <?php if (is_array($v)) continue; ?>
+                                <input type="hidden" name="<?php echo htmlspecialchars((string)$k); ?>" value="<?php echo htmlspecialchars((string)$v); ?>">
+                            <?php endforeach; ?>
+                            <input type="hidden" name="switch_user" value="1">
+                            <select name="switch_user_employee_id" aria-label="Switch user">
+                                <option value="0" <?php echo $currentSessionEmployeeId <= 0 ? 'selected' : ''; ?>>No link</option>
+                                <?php foreach ($userSwitchOptions as $empOpt): ?>
+                                    <?php $empId = (int)($empOpt['id'] ?? 0); ?>
+                                    <option value="<?php echo $empId; ?>" <?php echo $currentSessionEmployeeId === $empId ? 'selected' : ''; ?>>
+                                        <?php echo htmlspecialchars((string)($empOpt['full_name'] ?? ('Employee #' . $empId))); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <select name="switch_user_role" aria-label="Switch role">
+                                <option value="employee" <?php echo $roleForNav === 'employee' ? 'selected' : ''; ?>>Employee</option>
+                                <option value="manager" <?php echo $roleForNav === 'manager' ? 'selected' : ''; ?>>Manager</option>
+                                <option value="admin" <?php echo $roleForNav === 'admin' ? 'selected' : ''; ?>>Admin</option>
+                            </select>
+                            <button type="submit" class="app-user-switch-btn app-user-switch-btn-inline">Switch</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            <?php elseif ($currentAction === 'dashboard'): ?>
+            <div class="app-kpi-session-strip">
+                <div class="app-kpi-strip-left">
+                    <?php if ($sidebarTab === 'kpi'): ?>
+                    <div class="app-local-tabs app-local-tabs-kpi" aria-label="KPI section navigation">
+                        <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=kpi&mode=view" class="app-local-tab kpi-local-tab <?php echo ($sidebarTab === 'kpi' && $sidebarKpiMode === 'view') ? 'active' : ''; ?>" data-nav-help="Read-only KPI review mode.">KPIs View</a>
+                        <?php if (!empty($canWriteKpi)): ?>
+                        <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=kpi&mode=edit" class="app-local-tab kpi-local-tab <?php echo ($sidebarTab === 'kpi' && $sidebarKpiMode === 'edit') ? 'active' : ''; ?>" data-nav-help="Edit KPI numbers and assumptions.">KPIs Edit</a>
+                        <?php endif; ?>
+                    </div>
+                    <?php elseif ($sidebarTab === 'inventory'): ?>
+                    <div class="app-local-tabs app-local-tabs-kpi" aria-label="Inventory section navigation">
+                        <a href="?action=dashboard&store=<?php echo $currentStoreId; ?>&date=<?php echo urlencode($currentDate); ?>&view=<?php echo urlencode($sidebarView); ?>&tab=inventory&mode=view" class="app-local-tab kpi-local-tab active" data-nav-help="Inventory management workspace.">Inventory</a>
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <div class="app-kpi-strip-right app-kpi-meta-bar">
+                    <button type="button" class="app-nav-help-toggle app-toggle-compact" data-context-help-toggle="1" aria-pressed="false" aria-label="Context Help: Off" title="Context Help: Off"></button>
+                    <button type="button" class="density-toggle app-toggle-compact" data-density-toggle="1" aria-pressed="false" aria-label="Density: Comfortable" title="Density: Comfortable"></button>
+                    <button type="button" class="contrast-toggle app-toggle-compact" data-contrast-toggle="1" aria-pressed="false" aria-label="Contrast: Off" title="Contrast: Off"></button>
+                    <span class="app-user-banner-sep">|</span>
+                    <strong>Logged in as:</strong>
+                    <span><?php echo htmlspecialchars($currentUserDisplay); ?></span>
+                    <span class="app-user-role"><?php echo htmlspecialchars($currentRoleDisplay); ?></span>
+                    <span class="app-user-banner-sep">|</span>
+                    <span>Store #<?php echo $currentStoreId > 0 ? $currentStoreId : 0; ?></span>
+                    <span class="app-user-banner-sep">|</span>
+                    <form method="GET" action="index.php" class="app-user-switch-form-inline">
+                        <?php foreach ($userSwitchQuery as $k => $v): ?>
+                            <?php if (is_array($v)) continue; ?>
+                            <input type="hidden" name="<?php echo htmlspecialchars((string)$k); ?>" value="<?php echo htmlspecialchars((string)$v); ?>">
+                        <?php endforeach; ?>
+                        <input type="hidden" name="switch_user" value="1">
+                        <select name="switch_user_employee_id" aria-label="Switch user">
+                            <option value="0" <?php echo $currentSessionEmployeeId <= 0 ? 'selected' : ''; ?>>No link</option>
+                            <?php foreach ($userSwitchOptions as $empOpt): ?>
+                                <?php $empId = (int)($empOpt['id'] ?? 0); ?>
+                                <option value="<?php echo $empId; ?>" <?php echo $currentSessionEmployeeId === $empId ? 'selected' : ''; ?>>
+                                    <?php echo htmlspecialchars((string)($empOpt['full_name'] ?? ('Employee #' . $empId))); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <select name="switch_user_role" aria-label="Switch role">
+                            <option value="employee" <?php echo $roleForNav === 'employee' ? 'selected' : ''; ?>>Employee</option>
+                            <option value="manager" <?php echo $roleForNav === 'manager' ? 'selected' : ''; ?>>Manager</option>
+                            <option value="admin" <?php echo $roleForNav === 'admin' ? 'selected' : ''; ?>>Admin</option>
+                        </select>
+                        <button type="submit" class="app-user-switch-btn app-user-switch-btn-inline">Switch</button>
+                    </form>
+                </div>
+            </div>
+            <?php endif; ?>
             <div class="container">
+                <?php if ($currentAction !== 'dashboard' && !$isTimeclockNavAction): ?>
+                <div class="app-user-banner">
+                    <strong>Logged in as:</strong>
+                    <span><?php echo htmlspecialchars($currentUserDisplay); ?></span>
+                    <span class="app-user-role"><?php echo htmlspecialchars($currentRoleDisplay); ?></span>
+                    <span class="app-user-banner-sep">|</span>
+                    <span>Store #<?php echo $currentStoreId > 0 ? $currentStoreId : 0; ?></span>
+                    <span class="app-user-banner-sep">|</span>
+                    <form method="GET" action="index.php" class="app-user-switch-form-inline app-user-switch-form-inline-light">
+                        <?php foreach ($userSwitchQuery as $k => $v): ?>
+                            <?php if (is_array($v)) continue; ?>
+                            <input type="hidden" name="<?php echo htmlspecialchars((string)$k); ?>" value="<?php echo htmlspecialchars((string)$v); ?>">
+                        <?php endforeach; ?>
+                        <input type="hidden" name="switch_user" value="1">
+                        <select name="switch_user_employee_id" aria-label="Switch user">
+                            <option value="0" <?php echo $currentSessionEmployeeId <= 0 ? 'selected' : ''; ?>>No link</option>
+                            <?php foreach ($userSwitchOptions as $empOpt): ?>
+                                <?php $empId = (int)($empOpt['id'] ?? 0); ?>
+                                <option value="<?php echo $empId; ?>" <?php echo $currentSessionEmployeeId === $empId ? 'selected' : ''; ?>>
+                                    <?php echo htmlspecialchars((string)($empOpt['full_name'] ?? ('Employee #' . $empId))); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <select name="switch_user_role" aria-label="Switch role">
+                            <option value="employee" <?php echo $roleForNav === 'employee' ? 'selected' : ''; ?>>Employee</option>
+                            <option value="manager" <?php echo $roleForNav === 'manager' ? 'selected' : ''; ?>>Manager</option>
+                            <option value="admin" <?php echo $roleForNav === 'admin' ? 'selected' : ''; ?>>Admin</option>
+                        </select>
+                        <button type="submit" class="app-user-switch-btn app-user-switch-btn-inline">Switch</button>
+                    </form>
+                </div>
+                <?php endif; ?>
