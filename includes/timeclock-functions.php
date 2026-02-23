@@ -53,6 +53,23 @@ function getTimeClockRoleOptions($storeId) {
     return $out;
 }
 
+function getTimeclockAllowedEmployeeRoles() {
+    return ['Associate', 'Assistant Manager', 'Manager', 'Admin', 'Employee', 'Cashier', 'Stock'];
+}
+
+function normalizeTimeclockEmployeeRole($roleName) {
+    $roleName = trim((string)$roleName);
+    if ($roleName === '') {
+        return null;
+    }
+    foreach (getTimeclockAllowedEmployeeRoles() as $allowedRole) {
+        if (strcasecmp($allowedRole, $roleName) === 0) {
+            return $allowedRole;
+        }
+    }
+    return null;
+}
+
 function getEmployeeByIdForStore($employeeId, $storeId) {
     try {
         $pdo = getDB();
@@ -81,6 +98,182 @@ function verifyEmployeePinForStore($employeeId, $storeId, $pin) {
         return null;
     }
     return $employee;
+}
+
+function getTimeclockEmployeesWithLocationAccess($includeInactive = true) {
+    try {
+        $pdo = getDB();
+        $sql = "
+            SELECT
+                e.id,
+                e.full_name,
+                e.role_name,
+                e.hourly_rate_cents,
+                e.is_active,
+                COALESCE(STRING_AGG(DISTINCT CASE WHEN el.is_active THEN s.name ELSE NULL END, ', ' ORDER BY CASE WHEN el.is_active THEN s.name ELSE NULL END), '') AS active_location_names,
+                COALESCE(STRING_AGG(DISTINCT CASE WHEN el.is_active THEN (s.id::text) ELSE NULL END, ',' ORDER BY CASE WHEN el.is_active THEN (s.id::text) ELSE NULL END), '') AS active_location_ids_csv
+            FROM employees e
+            LEFT JOIN employee_locations el ON el.employee_id = e.id
+            LEFT JOIN stores s ON s.id = el.store_id
+        ";
+        if (!$includeInactive) {
+            $sql .= " WHERE e.is_active = TRUE ";
+        }
+        $sql .= "
+            GROUP BY e.id, e.full_name, e.role_name, e.hourly_rate_cents, e.is_active
+            ORDER BY e.full_name ASC
+        ";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute();
+        return $stmt->fetchAll();
+    } catch (Throwable $e) {
+        error_log('getTimeclockEmployeesWithLocationAccess error: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function createTimeclockEmployeeWithLocations(array $data, $actorName = 'manager') {
+    try {
+        $fullName = trim((string)($data['full_name'] ?? ''));
+        $roleName = trim((string)($data['role_name'] ?? 'Associate'));
+        $normalizedRoleName = normalizeTimeclockEmployeeRole($roleName);
+        $pin = trim((string)($data['pin'] ?? ''));
+        $hourlyRateCents = max(0, (int)($data['hourly_rate_cents'] ?? 0));
+        $locationStoreIds = array_values(array_unique(array_filter(array_map('intval', (array)($data['location_store_ids'] ?? [])), function ($v) { return $v > 0; })));
+        $isActive = !empty($data['is_active']);
+        if ($fullName === '') {
+            return ['success' => false, 'message' => 'Employee name is required.'];
+        }
+        if ($normalizedRoleName === null) {
+            return ['success' => false, 'message' => 'Invalid role. Allowed roles: ' . implode(', ', getTimeclockAllowedEmployeeRoles()) . '.'];
+        }
+        if (!preg_match('/^\d{4,10}$/', $pin)) {
+            return ['success' => false, 'message' => 'PIN must be 4-10 digits.'];
+        }
+        if (empty($locationStoreIds)) {
+            return ['success' => false, 'message' => 'Select at least one location.'];
+        }
+        $pinHash = password_hash($pin, PASSWORD_DEFAULT);
+        $pdo = getDB();
+        $ownsTx = !$pdo->inTransaction();
+        if ($ownsTx) {
+            $pdo->beginTransaction();
+        }
+        $stmt = $pdo->prepare("
+            INSERT INTO employees
+                (full_name, role_name, pin_hash, hourly_rate_cents, is_active, created_at, updated_at)
+            VALUES
+                (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            RETURNING id
+        ");
+        $stmt->execute([$fullName, $normalizedRoleName, $pinHash, $hourlyRateCents, $isActive ? 't' : 'f']);
+        $row = $stmt->fetch();
+        $employeeId = (int)($row['id'] ?? 0);
+        if ($employeeId <= 0) {
+            if ($ownsTx && $pdo->inTransaction()) $pdo->rollBack();
+            return ['success' => false, 'message' => 'Unable to create employee.'];
+        }
+        $locStmt = $pdo->prepare("
+            INSERT INTO employee_locations (employee_id, store_id, is_active, created_at)
+            VALUES (?, ?, TRUE, CURRENT_TIMESTAMP)
+            ON CONFLICT (employee_id, store_id)
+            DO UPDATE SET is_active = TRUE
+        ");
+        foreach ($locationStoreIds as $sid) {
+            $locStmt->execute([$employeeId, (int)$sid]);
+        }
+        if ($ownsTx && $pdo->inTransaction()) {
+            $pdo->commit();
+        }
+        logTimeclockAudit((int)$locationStoreIds[0], $employeeId, (string)$actorName, 'EMPLOYEE_CREATED', [
+            'full_name' => $fullName,
+            'role_name' => $normalizedRoleName,
+            'location_store_ids' => $locationStoreIds
+        ]);
+        return ['success' => true, 'employee_id' => $employeeId, 'message' => 'Employee created.'];
+    } catch (Throwable $e) {
+        try {
+            $pdo = getDB();
+            if ($pdo->inTransaction()) $pdo->rollBack();
+        } catch (Throwable $inner) {}
+        error_log('createTimeclockEmployeeWithLocations error: ' . $e->getMessage());
+        return ['success' => false, 'message' => 'Unable to create employee.'];
+    }
+}
+
+function updateTimeclockEmployeeWithLocations($employeeId, array $data, $actorName = 'manager') {
+    try {
+        $employeeId = (int)$employeeId;
+        $fullName = trim((string)($data['full_name'] ?? ''));
+        $roleName = trim((string)($data['role_name'] ?? 'Associate'));
+        $normalizedRoleName = normalizeTimeclockEmployeeRole($roleName);
+        $pin = trim((string)($data['pin'] ?? ''));
+        $hourlyRateCents = max(0, (int)($data['hourly_rate_cents'] ?? 0));
+        $locationStoreIds = array_values(array_unique(array_filter(array_map('intval', (array)($data['location_store_ids'] ?? [])), function ($v) { return $v > 0; })));
+        $isActive = !empty($data['is_active']);
+        if ($employeeId <= 0 || $fullName === '') {
+            return ['success' => false, 'message' => 'Employee and name are required.'];
+        }
+        if ($normalizedRoleName === null) {
+            return ['success' => false, 'message' => 'Invalid role. Allowed roles: ' . implode(', ', getTimeclockAllowedEmployeeRoles()) . '.'];
+        }
+        if ($pin !== '' && !preg_match('/^\d{4,10}$/', $pin)) {
+            return ['success' => false, 'message' => 'PIN must be 4-10 digits when provided.'];
+        }
+        if (empty($locationStoreIds)) {
+            return ['success' => false, 'message' => 'Select at least one location.'];
+        }
+        $pdo = getDB();
+        $ownsTx = !$pdo->inTransaction();
+        if ($ownsTx) {
+            $pdo->beginTransaction();
+        }
+        if ($pin !== '') {
+            $pinHash = password_hash($pin, PASSWORD_DEFAULT);
+            $stmt = $pdo->prepare("
+                UPDATE employees
+                SET full_name = ?, role_name = ?, pin_hash = ?, hourly_rate_cents = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ");
+            $stmt->execute([$fullName, $normalizedRoleName, $pinHash, $hourlyRateCents, $isActive ? 't' : 'f', $employeeId]);
+        } else {
+            $stmt = $pdo->prepare("
+                UPDATE employees
+                SET full_name = ?, role_name = ?, hourly_rate_cents = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ");
+            $stmt->execute([$fullName, $normalizedRoleName, $hourlyRateCents, $isActive ? 't' : 'f', $employeeId]);
+        }
+        $disableStmt = $pdo->prepare("UPDATE employee_locations SET is_active = FALSE WHERE employee_id = ?");
+        $disableStmt->execute([$employeeId]);
+        $locStmt = $pdo->prepare("
+            INSERT INTO employee_locations (employee_id, store_id, is_active, created_at)
+            VALUES (?, ?, TRUE, CURRENT_TIMESTAMP)
+            ON CONFLICT (employee_id, store_id)
+            DO UPDATE SET is_active = TRUE
+        ");
+        foreach ($locationStoreIds as $sid) {
+            $locStmt->execute([$employeeId, (int)$sid]);
+        }
+        if ($ownsTx && $pdo->inTransaction()) {
+            $pdo->commit();
+        }
+        logTimeclockAudit((int)$locationStoreIds[0], $employeeId, (string)$actorName, 'EMPLOYEE_UPDATED', [
+            'full_name' => $fullName,
+            'role_name' => $normalizedRoleName,
+            'is_active' => $isActive ? 1 : 0,
+            'location_store_ids' => $locationStoreIds,
+            'pin_reset' => $pin !== ''
+        ]);
+        return ['success' => true, 'message' => 'Employee updated.'];
+    } catch (Throwable $e) {
+        try {
+            $pdo = getDB();
+            if ($pdo->inTransaction()) $pdo->rollBack();
+        } catch (Throwable $inner) {}
+        error_log('updateTimeclockEmployeeWithLocations error: ' . $e->getMessage());
+        return ['success' => false, 'message' => 'Unable to update employee.'];
+    }
 }
 
 function getOpenShiftForEmployeeStore($employeeId, $storeId) {
@@ -2060,6 +2253,33 @@ function getScheduleShiftsForStoreRange($storeId, $startDateYmd, $endDateYmd) {
     }
 }
 
+function getScheduleShiftsForEmployeeRangeAllStores($employeeId, $startDateYmd, $endDateYmd) {
+    try {
+        $empId = (int)$employeeId;
+        if ($empId <= 0) {
+            return [];
+        }
+        $pdo = getDB();
+        $startUtc = (new DateTime($startDateYmd . ' 00:00:00', new DateTimeZone(TIMEZONE)))->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:sP');
+        $endUtc = (new DateTime($endDateYmd . ' 23:59:59', new DateTimeZone(TIMEZONE)))->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:sP');
+        $stmt = $pdo->prepare("
+            SELECT s.*, e.full_name, st.name AS store_name
+            FROM timeclock_schedule_shifts s
+            INNER JOIN employees e ON e.id = s.employee_id
+            INNER JOIN stores st ON st.id = s.store_id
+            WHERE s.employee_id = ?
+              AND s.start_utc <= ?
+              AND s.end_utc >= ?
+            ORDER BY s.start_utc ASC
+        ");
+        $stmt->execute([$empId, $endUtc, $startUtc]);
+        return $stmt->fetchAll();
+    } catch (Throwable $e) {
+        error_log('getScheduleShiftsForEmployeeRangeAllStores error: ' . $e->getMessage());
+        return [];
+    }
+}
+
 function getMissedClockInAlertsForStoreDate($storeId, $dateYmd, $graceMinutes = 15, $limit = 100) {
     try {
         if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$dateYmd)) {
@@ -2421,6 +2641,7 @@ function getScheduleShiftById($shiftId, $storeId) {
 
 function addScheduleShift($data) {
     try {
+        $minimumShiftMinutes = 30;
         $employeeId = (int)$data['employee_id'];
         $storeId = (int)$data['store_id'];
         $startUtc = (string)$data['start_utc'];
@@ -2431,8 +2652,12 @@ function addScheduleShift($data) {
         if (strtotime($endUtc) <= strtotime($startUtc)) {
             return ['success' => false, 'message' => 'Shift end must be after shift start.'];
         }
+        $durationMinutes = (int)round((strtotime($endUtc) - strtotime($startUtc)) / 60);
+        if ($durationMinutes < $minimumShiftMinutes) {
+            return ['success' => false, 'message' => 'Shift must be at least 30 minutes.'];
+        }
         if (detectScheduleOverlapAnyStore($employeeId, $startUtc, $endUtc)) {
-            return ['success' => false, 'message' => 'Shift conflicts with this employee schedule at another store/time.'];
+            return ['success' => false, 'message' => 'Shift overlaps an existing shift for this employee (same or different location).'];
         }
         $tz = new DateTimeZone(TIMEZONE);
         $startLocal = new DateTime($startUtc, new DateTimeZone('UTC'));
@@ -2491,6 +2716,7 @@ function addScheduleShift($data) {
 
 function updateScheduleShift($shiftId, $data) {
     try {
+        $minimumShiftMinutes = 30;
         $shiftId = (int)$shiftId;
         $employeeId = (int)$data['employee_id'];
         $storeId = (int)$data['store_id'];
@@ -2502,12 +2728,16 @@ function updateScheduleShift($shiftId, $data) {
         if (strtotime($endUtc) <= strtotime($startUtc)) {
             return ['success' => false, 'message' => 'Shift end must be after shift start.'];
         }
+        $durationMinutes = (int)round((strtotime($endUtc) - strtotime($startUtc)) / 60);
+        if ($durationMinutes < $minimumShiftMinutes) {
+            return ['success' => false, 'message' => 'Shift must be at least 30 minutes.'];
+        }
         $existing = getScheduleShiftById($shiftId, $storeId);
         if (!$existing) {
             return ['success' => false, 'message' => 'Shift not found.'];
         }
         if (detectScheduleOverlapAnyStoreExcludingShift($employeeId, $startUtc, $endUtc, $shiftId)) {
-            return ['success' => false, 'message' => 'Shift conflicts with this employee schedule at another store/time.'];
+            return ['success' => false, 'message' => 'Shift overlaps an existing shift for this employee (same or different location).'];
         }
         $tz = new DateTimeZone(TIMEZONE);
         $startLocal = new DateTime($startUtc, new DateTimeZone('UTC'));
@@ -2596,6 +2826,109 @@ function deleteScheduleShift($shiftId, $storeId, $managerName) {
     } catch (Throwable $e) {
         error_log('deleteScheduleShift error: ' . $e->getMessage());
         return ['success' => false, 'message' => 'Unable to delete shift.'];
+    }
+}
+
+function splitScheduleShift($shiftId, $storeId, $splitUtc, $managerName) {
+    try {
+        $minimumShiftMinutes = 30;
+        $shiftId = (int)$shiftId;
+        $storeId = (int)$storeId;
+        $splitUtc = trim((string)$splitUtc);
+        $managerName = trim((string)$managerName);
+        if ($shiftId <= 0 || $storeId <= 0 || $splitUtc === '' || $managerName === '') {
+            return ['success' => false, 'message' => 'Shift, store, split time, and manager are required.'];
+        }
+        $existing = getScheduleShiftById($shiftId, $storeId);
+        if (!$existing) {
+            return ['success' => false, 'message' => 'Shift not found.'];
+        }
+
+        $startTs = strtotime((string)($existing['start_utc'] ?? ''));
+        $endTs = strtotime((string)($existing['end_utc'] ?? ''));
+        $splitTs = strtotime($splitUtc);
+        if (!$startTs || !$endTs || !$splitTs || $splitTs <= $startTs || $splitTs >= $endTs) {
+            return ['success' => false, 'message' => 'Split time must be inside the shift range.'];
+        }
+        $firstMinutes = (int)round(($splitTs - $startTs) / 60);
+        $secondMinutes = (int)round(($endTs - $splitTs) / 60);
+        if ($firstMinutes < $minimumShiftMinutes || $secondMinutes < $minimumShiftMinutes) {
+            return ['success' => false, 'message' => 'Each split section must be at least 30 minutes.'];
+        }
+
+        $tz = new DateTimeZone(TIMEZONE);
+        $startLocal = new DateTime((string)$existing['start_utc'], new DateTimeZone('UTC'));
+        $endLocal = new DateTime((string)$existing['end_utc'], new DateTimeZone('UTC'));
+        $startLocal->setTimezone($tz);
+        $endLocal->setTimezone($tz);
+        $startDateYmd = $startLocal->format('Y-m-d');
+        $endDateYmd = $endLocal->format('Y-m-d');
+        if (hasLockedPayrollPeriodOverlap($storeId, $startDateYmd, $endDateYmd)) {
+            return ['success' => false, 'message' => 'This shift is inside a locked payroll period. Unlock period first.'];
+        }
+
+        $pdo = getDB();
+        $ownsTx = !$pdo->inTransaction();
+        if ($ownsTx) {
+            $pdo->beginTransaction();
+        }
+        $updateStmt = $pdo->prepare("
+            UPDATE timeclock_schedule_shifts
+            SET end_utc = ?, break_minutes = ?, last_modified_by = ?, note = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND store_id = ?
+        ");
+        $updateStmt->execute([
+            gmdate('Y-m-d H:i:sP', $splitTs),
+            max(0, (int)($existing['break_minutes'] ?? 0)),
+            $managerName,
+            'SPLIT_PARENT',
+            $shiftId,
+            $storeId
+        ]);
+
+        $insertStmt = $pdo->prepare("
+            INSERT INTO timeclock_schedule_shifts
+                (employee_id, store_id, role_name, start_utc, end_utc, break_minutes, status, last_modified_by, note)
+            VALUES
+                (?, ?, ?, ?, ?, ?, COALESCE(?, 'DRAFT'), ?, ?)
+            RETURNING id
+        ");
+        $insertStmt->execute([
+            (int)($existing['employee_id'] ?? 0),
+            $storeId,
+            (string)($existing['role_name'] ?? 'Employee'),
+            gmdate('Y-m-d H:i:sP', $splitTs),
+            (string)($existing['end_utc'] ?? ''),
+            0,
+            (string)($existing['status'] ?? 'DRAFT'),
+            $managerName,
+            'SPLIT_CHILD'
+        ]);
+        $newRow = $insertStmt->fetch();
+        $newShiftId = (int)($newRow['id'] ?? 0);
+
+        if ($ownsTx) {
+            $pdo->commit();
+        }
+        logTimeclockAudit(
+            $storeId,
+            (int)($existing['employee_id'] ?? 0),
+            $managerName,
+            'SCHEDULE_SHIFT_SPLIT',
+            ['parent_shift_id' => $shiftId, 'child_shift_id' => $newShiftId, 'split_utc' => gmdate('Y-m-d H:i:sP', $splitTs)]
+        );
+        return ['success' => true, 'new_shift_id' => $newShiftId, 'message' => 'Shift split successfully.'];
+    } catch (Throwable $e) {
+        try {
+            $pdo = getDB();
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+        } catch (Throwable $inner) {
+            // ignore rollback errors
+        }
+        error_log('splitScheduleShift error: ' . $e->getMessage());
+        return ['success' => false, 'message' => 'Unable to split shift.'];
     }
 }
 
@@ -3823,6 +4156,26 @@ function getRecentPtoRequestsByStore($storeId, $limit = 30) {
         return $stmt->fetchAll();
     } catch (Throwable $e) {
         error_log('getRecentPtoRequestsByStore error: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function getRecentPtoRequestsAllStores($limit = 60) {
+    try {
+        $safe = max(1, min(500, (int)$limit));
+        $pdo = getDB();
+        $stmt = $pdo->prepare("
+            SELECT r.*, e.full_name, s.name AS store_name
+            FROM timeclock_pto_requests r
+            INNER JOIN employees e ON e.id = r.employee_id
+            INNER JOIN stores s ON s.id = r.store_id
+            ORDER BY r.submitted_at DESC
+            LIMIT $safe
+        ");
+        $stmt->execute();
+        return $stmt->fetchAll();
+    } catch (Throwable $e) {
+        error_log('getRecentPtoRequestsAllStores error: ' . $e->getMessage());
         return [];
     }
 }

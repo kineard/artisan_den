@@ -468,7 +468,11 @@ if ($storeId && $isTimeclockAction) {
     $calendarFetchEndYmd = (clone $monthDateObj)->modify('last day of +1 month')->format('Y-m-d');
     $timeClockCalendarRangeStart = min($timeClockScheduleWeekRange['start'], $monthStartYmd, $calendarFetchStartYmd);
     $timeClockCalendarRangeEnd = max($timeClockScheduleWeekRange['end'], $monthEndYmd, $calendarFetchEndYmd);
-    $timeClockCalendarScheduleShifts = getScheduleShiftsForStoreRange($storeId, $timeClockCalendarRangeStart, $timeClockCalendarRangeEnd);
+    if ($isEmployeeSurface && $sessionEmployeeIdTc > 0) {
+        $timeClockCalendarScheduleShifts = getScheduleShiftsForEmployeeRangeAllStores((int)$sessionEmployeeIdTc, $timeClockCalendarRangeStart, $timeClockCalendarRangeEnd);
+    } else {
+        $timeClockCalendarScheduleShifts = getScheduleShiftsForStoreRange($storeId, $timeClockCalendarRangeStart, $timeClockCalendarRangeEnd);
+    }
     foreach ($timeClockCalendarScheduleShifts as $shift) {
         $startLocalObj = null;
         $endLocalObj = null;
@@ -492,6 +496,8 @@ if ($storeId && $isTimeclockAction) {
             'shift_id' => (int)($shift['id'] ?? 0),
             'employee_id' => (int)($shift['employee_id'] ?? 0),
             'employee_name' => (string)($shift['full_name'] ?? ''),
+            'store_id' => (int)($shift['store_id'] ?? 0),
+            'store_name' => (string)($shift['store_name'] ?? ($currentStore['name'] ?? ('Store #' . (int)($shift['store_id'] ?? 0)))),
             'role_name' => (string)($shift['role_name'] ?? 'Employee'),
             'break_minutes' => (int)($shift['break_minutes'] ?? 0),
             'start_utc' => (string)($shift['start_utc'] ?? ''),
@@ -602,6 +608,12 @@ if ($storeId && $isTimeclockAction) {
     $timeClockPtoBalances = getPtoBalancesByStore($storeId);
     $timeClockPendingPtoRequests = getPendingPtoRequestsByStore($storeId);
     $timeClockRecentPtoRequests = getRecentPtoRequestsByStore($storeId, 30);
+    $timeClockRecentPtoRequestsAllStores = (!$isEmployeeSurface && $canManageTimeclock)
+        ? getRecentPtoRequestsAllStores(100)
+        : [];
+    $timeClockUserManagerRows = (!$isEmployeeSurface && $canManageTimeclock)
+        ? getTimeclockEmployeesWithLocationAccess(true)
+        : [];
     $timeclockTaskLogicV2Enabled = isTimeclockTaskLogicV2Enabled((int)$storeId);
     if ($timeclockTaskLogicV2Enabled) {
         generateTimeclockTasksFromTemplates((int)$storeId, (string)$date, (string)$currentUserName);
@@ -705,7 +717,8 @@ if ($storeId && $isTimeclockAction) {
         });
         if (!empty($employeeFutureShifts)) {
             $nextShift = $employeeFutureShifts[0];
-            $employeeDashboardSummary['next_shift_label'] = formatDateForUser((string)($nextShift['start_date_ymd'] ?? '')) . ' ' . ((string)($nextShift['start_time_label'] ?? '')) . ' - ' . ((string)($nextShift['end_time_label'] ?? ''));
+            $nextShiftStore = trim((string)($nextShift['store_name'] ?? ''));
+            $employeeDashboardSummary['next_shift_label'] = formatDateForUser((string)($nextShift['start_date_ymd'] ?? '')) . ' ' . ((string)($nextShift['start_time_label'] ?? '')) . ' - ' . ((string)($nextShift['end_time_label'] ?? '')) . ($nextShiftStore !== '' ? (' @ ' . $nextShiftStore) : '');
         }
 
         foreach ($timeClockTasksForDate as $taskRow) {
@@ -792,15 +805,34 @@ if ($storeId && $isTimeclockAction) {
                         $firstShift = $dayRows[0];
                         $roleLabel = (string)($firstShift['role_name'] ?? 'Employee');
                         $timeLabel = trim((string)($firstShift['start_time_label'] ?? '')) . ' - ' . trim((string)($firstShift['end_time_label'] ?? ''));
+                        $storeLabel = trim((string)($firstShift['store_name'] ?? ''));
+                        $storeMap = [];
+                        foreach ($dayRows as $shiftRow) {
+                            $storeName = trim((string)($shiftRow['store_name'] ?? ''));
+                            if ($storeName !== '') $storeMap[$storeName] = true;
+                        }
+                        $storeList = array_keys($storeMap);
+                        $storeListLabel = implode(', ', $storeList);
+                        if (strlen($storeListLabel) > 64 && count($storeList) > 2) {
+                            $storeListLabel = $storeList[0] . ', ' . $storeList[1] . ' (+' . (count($storeList) - 2) . ' more)';
+                        }
+                        if (count($storeMap) > 1) {
+                            $storeLabel = $storeLabel !== '' ? ($storeLabel . ' (+' . (count($storeMap) - 1) . ' locations)') : (count($storeMap) . ' locations');
+                        }
                         if (count($dayRows) > 1) {
                             $timeLabel .= ' (+' . (count($dayRows) - 1) . ' more)';
                         }
+                    } else {
+                        $storeLabel = '';
+                        $storeListLabel = '';
                     }
                     $employeeWeekDateCards[] = [
                         'day_label' => $cursor->format('D, M j'),
                         'status_label' => $isWorking ? 'WORKING' : 'OFF',
                         'role_label' => $roleLabel,
                         'time_label' => $timeLabel,
+                        'store_label' => $storeLabel,
+                        'store_list_label' => $storeListLabel,
                         'is_working' => $isWorking,
                     ];
                     $cursor->modify('+1 day');
@@ -1443,6 +1475,7 @@ include 'includes/header.php';
             'tc_panel_settings' => $requestedPanel === 'tc_panel_settings',
             'tc_panel_live' => $requestedPanel === 'tc_panel_live',
             'tc_panel_admin' => $requestedPanel === 'tc_panel_admin',
+            'tc_panel_users' => $requestedPanel === 'tc_panel_users',
             'tc_panel_mgr_reviews' => $requestedPanel === 'tc_panel_mgr_reviews',
             'tc_panel_mgr_notes' => $requestedPanel === 'tc_panel_mgr_notes',
         ]
@@ -1669,6 +1702,12 @@ include 'includes/header.php';
                 <div class="employee-week-day-card-body">
                     <div class="employee-week-day-card-role"><?php echo htmlspecialchars((string)($weekCard['role_label'] ?? '')); ?></div>
                     <div class="employee-week-day-card-time"><?php echo htmlspecialchars((string)($weekCard['time_label'] ?? '')); ?></div>
+                    <?php if (!empty($weekCard['store_label'])): ?>
+                        <div class="employee-week-day-card-store"><?php echo htmlspecialchars((string)$weekCard['store_label']); ?></div>
+                    <?php endif; ?>
+                    <?php if (!empty($weekCard['store_list_label'])): ?>
+                        <div class="timeclock-muted"><?php echo htmlspecialchars((string)$weekCard['store_list_label']); ?></div>
+                    <?php endif; ?>
                 </div>
             </div>
             <?php endforeach; ?>
@@ -1730,6 +1769,7 @@ include 'includes/header.php';
         </div>
         <div class="timeclock-quick-actions">
             <a class="timeclock-quick-btn is-primary" href="?action=schedule_center&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>">Open Schedule Builder</a>
+            <a class="timeclock-quick-btn" href="?action=manager_dashboard&store=<?php echo (int)$storeId; ?>&date=<?php echo urlencode((string)$date); ?>&panel=tc_panel_users">Open User Manager</a>
         </div>
     </div>
     <div class="timeclock-launcher-card" id="mgr_tasks_card">
@@ -1803,6 +1843,142 @@ include 'includes/header.php';
         <div class="timeclock-hub-stats">
             <span class="<?php echo (int)$managerDashboardSummary['coaching_notes_open'] > 0 ? 'timeclock-badge-warning' : 'timeclock-badge-ok'; ?>">Open notes: <?php echo (int)$managerDashboardSummary['coaching_notes_open']; ?></span>
         </div>
+    </div>
+    <?php endif; ?>
+    <?php if ($currentAction === 'manager_dashboard' && !empty($inlinePanelByRequest['tc_panel_users'])): ?>
+    <div class="timeclock-mobile-card timeclock-inline-section" id="tc_panel_users">
+        <h2>User Manager</h2>
+        <p class="timeclock-mobile-help">Spreadsheet-style employee manager. Add at top, edit inline, and manage per-location availability manually.</p>
+        <?php if ($canManageTimeclock): ?>
+        <div class="timeclock-panel">
+            <div class="timeclock-approve-controls" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <h3 style="margin:0;">Employees</h3>
+                <button type="button" class="btn btn-primary" id="tc_user_add_row_btn">Add Employee</button>
+            </div>
+
+            <form id="tc_user_create_form" method="POST" action="">
+                <input type="hidden" name="timeclock_user_create" value="1">
+                <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
+                <input type="hidden" name="date" value="<?php echo htmlspecialchars((string)$date); ?>">
+                <input type="hidden" name="manager_name" value="<?php echo htmlspecialchars((string)$currentUserName); ?>">
+                <input type="hidden" name="full_name" value="">
+            </form>
+
+            <?php foreach ($timeClockUserManagerRows as $row): ?>
+                <?php $employeeIdRow = (int)($row['id'] ?? 0); ?>
+                <form id="tc_user_update_form_<?php echo $employeeIdRow; ?>" method="POST" action="">
+                    <input type="hidden" name="timeclock_user_update" value="1">
+                    <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
+                    <input type="hidden" name="date" value="<?php echo htmlspecialchars((string)$date); ?>">
+                    <input type="hidden" name="employee_id" value="<?php echo $employeeIdRow; ?>">
+                    <input type="hidden" name="manager_name" value="<?php echo htmlspecialchars((string)$currentUserName); ?>">
+                    <input type="hidden" name="full_name" value="">
+                </form>
+            <?php endforeach; ?>
+
+            <div class="history-table">
+                <table class="tc-user-grid">
+                    <thead>
+                        <tr>
+                            <th>First Name</th>
+                            <th>Last Name</th>
+                            <th>Role</th>
+                            <th>Hourly Rate</th>
+                            <th>PIN</th>
+                            <th>Active</th>
+                            <th>Locations</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tc_user_grid_body">
+                        <?php
+                            $userManagerRoleOptions = function_exists('getTimeclockAllowedEmployeeRoles')
+                                ? getTimeclockAllowedEmployeeRoles()
+                                : ['Associate', 'Assistant Manager', 'Manager', 'Admin', 'Employee', 'Cashier', 'Stock'];
+                            $userManagerPreferredRoleOrder = ['Associate', 'Assistant Manager', 'Manager', 'Admin', 'Employee', 'Cashier', 'Stock'];
+                            $userManagerRoleOrderMap = array_flip($userManagerPreferredRoleOrder);
+                            usort($userManagerRoleOptions, function ($a, $b) use ($userManagerRoleOrderMap) {
+                                $aKey = array_key_exists($a, $userManagerRoleOrderMap) ? (int)$userManagerRoleOrderMap[$a] : 9999;
+                                $bKey = array_key_exists($b, $userManagerRoleOrderMap) ? (int)$userManagerRoleOrderMap[$b] : 9999;
+                                if ($aKey === $bKey) {
+                                    return strcasecmp((string)$a, (string)$b);
+                                }
+                                return $aKey <=> $bKey;
+                            });
+                        ?>
+                        <tr id="tc_user_new_row" class="tc-user-row-new" hidden>
+                            <td><input type="text" class="tc-user-first-name" form="tc_user_create_form" maxlength="80" placeholder="First" required></td>
+                            <td><input type="text" class="tc-user-last-name" form="tc_user_create_form" maxlength="80" placeholder="Last"></td>
+                            <td>
+                                <select name="role_name" form="tc_user_create_form" required>
+                                    <?php foreach ($userManagerRoleOptions as $roleOpt): ?>
+                                        <option value="<?php echo htmlspecialchars($roleOpt); ?>" <?php echo strcasecmp($roleOpt, 'Associate') === 0 ? 'selected' : ''; ?>><?php echo htmlspecialchars($roleOpt); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </td>
+                            <td><input type="number" step="0.01" min="0" name="hourly_rate" form="tc_user_create_form" value="0"></td>
+                            <td><input type="password" name="pin" form="tc_user_create_form" inputmode="numeric" pattern="[0-9]{4,10}" minlength="4" maxlength="10" placeholder="4-10 digits" required></td>
+                            <td><input type="checkbox" name="is_active" form="tc_user_create_form" value="1" checked></td>
+                            <td>
+                                <div class="tc-user-locations">
+                                    <?php foreach ($stores as $st): ?>
+                                        <?php $sid = (int)($st['id'] ?? 0); ?>
+                                        <label><input type="checkbox" name="location_store_ids[]" form="tc_user_create_form" value="<?php echo $sid; ?>" <?php echo $sid === (int)$storeId ? 'checked' : ''; ?>> <?php echo htmlspecialchars((string)($st['name'] ?? ('Store #' . $sid))); ?></label>
+                                    <?php endforeach; ?>
+                                </div>
+                            </td>
+                            <td><button type="submit" class="btn btn-primary" form="tc_user_create_form">Create</button></td>
+                        </tr>
+
+                        <?php if (empty($timeClockUserManagerRows)): ?>
+                            <tr><td colspan="8" class="timeclock-muted">No employees yet. Click Add Employee.</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($timeClockUserManagerRows as $row): ?>
+                                <?php
+                                    $employeeIdRow = (int)($row['id'] ?? 0);
+                                    $fullNameRow = trim((string)($row['full_name'] ?? ''));
+                                    $nameParts = preg_split('/\s+/', $fullNameRow, 2);
+                                    $firstNameRow = (string)($nameParts[0] ?? '');
+                                    $lastNameRow = (string)($nameParts[1] ?? '');
+                                    $activeLocationIdsCsv = trim((string)($row['active_location_ids_csv'] ?? ''));
+                                    $activeLocationIds = array_values(array_filter(array_map('intval', explode(',', $activeLocationIdsCsv)), function ($v) { return $v > 0; }));
+                                ?>
+                                <tr>
+                                    <td><input type="text" class="tc-user-first-name" form="tc_user_update_form_<?php echo $employeeIdRow; ?>" maxlength="80" value="<?php echo htmlspecialchars($firstNameRow); ?>" required></td>
+                                    <td><input type="text" class="tc-user-last-name" form="tc_user_update_form_<?php echo $employeeIdRow; ?>" maxlength="80" value="<?php echo htmlspecialchars($lastNameRow); ?>"></td>
+                                    <td>
+                                        <?php $currentRole = (string)($row['role_name'] ?? 'Associate'); ?>
+                                        <select name="role_name" form="tc_user_update_form_<?php echo $employeeIdRow; ?>" required>
+                                            <?php foreach ($userManagerRoleOptions as $roleOpt): ?>
+                                                <option value="<?php echo htmlspecialchars($roleOpt); ?>" <?php echo strcasecmp($roleOpt, $currentRole) === 0 ? 'selected' : ''; ?>><?php echo htmlspecialchars($roleOpt); ?></option>
+                                            <?php endforeach; ?>
+                                            <?php if (!in_array($currentRole, $userManagerRoleOptions, true) && trim($currentRole) !== ''): ?>
+                                                <option value="<?php echo htmlspecialchars($currentRole); ?>" selected><?php echo htmlspecialchars($currentRole); ?></option>
+                                            <?php endif; ?>
+                                        </select>
+                                    </td>
+                                    <td><input type="number" step="0.01" min="0" name="hourly_rate" form="tc_user_update_form_<?php echo $employeeIdRow; ?>" value="<?php echo number_format(((int)($row['hourly_rate_cents'] ?? 0)) / 100, 2, '.', ''); ?>"></td>
+                                    <td><input type="password" name="pin" form="tc_user_update_form_<?php echo $employeeIdRow; ?>" inputmode="numeric" pattern="[0-9]{4,10}" minlength="4" maxlength="10" placeholder="Blank = keep"></td>
+                                    <td><input type="checkbox" name="is_active" form="tc_user_update_form_<?php echo $employeeIdRow; ?>" value="1" <?php echo !empty($row['is_active']) ? 'checked' : ''; ?>></td>
+                                    <td>
+                                        <div class="tc-user-locations">
+                                            <?php foreach ($stores as $st): ?>
+                                                <?php $sid = (int)($st['id'] ?? 0); ?>
+                                                <label><input type="checkbox" name="location_store_ids[]" form="tc_user_update_form_<?php echo $employeeIdRow; ?>" value="<?php echo $sid; ?>" <?php echo in_array($sid, $activeLocationIds, true) ? 'checked' : ''; ?>> <?php echo htmlspecialchars((string)($st['name'] ?? ('Store #' . $sid))); ?></label>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    </td>
+                                    <td><button type="submit" class="btn" form="tc_user_update_form_<?php echo $employeeIdRow; ?>">Save</button></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <?php else: ?>
+            <p class="timeclock-muted">Manager permission required.</p>
+        <?php endif; ?>
     </div>
     <?php endif; ?>
 
@@ -1954,7 +2130,7 @@ include 'includes/header.php';
             <div class="timeclock-dnd-card">
                 <div class="timeclock-dnd-header">
                     <h3>Manager Staffing Board (15-min snap)</h3>
-                    <p class="timeclock-mobile-help">Add employees to a day, auto-create a 3:00 PM block, then drag the block or its top/bottom handles.</p>
+                    <p class="timeclock-mobile-help">Add employees to a day, auto-create a 3:00 PM block, then drag the block or its top/bottom handles. Minimum shift length is 30 minutes. Use the x button on a shift block to delete quickly.</p>
                 </div>
                 <div class="timeclock-dnd-toolbar">
                     <span id="tc_lane_week_status" class="<?php echo (($timeClockScheduleWeekStatus['status'] ?? 'DRAFT') === 'PUBLISHED') ? 'timeclock-badge-ok' : 'timeclock-badge-warning'; ?>">
@@ -2769,6 +2945,8 @@ include 'includes/header.php';
                 $ptoRecentRowsForView = array_values(array_filter($timeClockRecentPtoRequests, function ($row) use ($sessionEmployeeIdTc) {
                     return (int)($row['employee_id'] ?? 0) === (int)$sessionEmployeeIdTc;
                 }));
+            } elseif (!$isEmployeePtoView && !empty($timeClockRecentPtoRequestsAllStores)) {
+                $ptoRecentRowsForView = $timeClockRecentPtoRequestsAllStores;
             }
         ?>
         <h2><?php echo $isEmployeePtoView ? 'My PTO' : 'PTO / Leave Setup (Company-Wide)'; ?></h2>
@@ -2980,17 +3158,18 @@ include 'includes/header.php';
             </div>
             <div class="timeclock-panel">
                 <h3>Recent PTO Requests</h3>
-                <?php if (empty($timeClockRecentPtoRequests)): ?>
+                <?php if (empty($ptoRecentRowsForView)): ?>
                     <p class="timeclock-muted">No PTO requests yet.</p>
                 <?php else: ?>
                     <table class="history-table">
                         <thead>
-                            <tr><th>Employee</th><th>Dates</th><th>Hours</th><th>Status</th><th>Reviewed By</th></tr>
+                            <tr><th>Employee</th><th>Store</th><th>Dates</th><th>Hours</th><th>Status</th><th>Reviewed By</th></tr>
                         </thead>
                         <tbody>
-                            <?php foreach ($timeClockRecentPtoRequests as $req): ?>
+                            <?php foreach ($ptoRecentRowsForView as $req): ?>
                                 <tr>
                                     <td><?php echo htmlspecialchars($req['full_name']); ?></td>
+                                    <td><?php echo htmlspecialchars((string)($req['store_name'] ?? ($currentStore['name'] ?? '-'))); ?></td>
                                     <td><?php echo htmlspecialchars(formatDateForUser($req['request_start_date'] ?? '')); ?> to <?php echo htmlspecialchars(formatDateForUser($req['request_end_date'] ?? '')); ?></td>
                                     <td><?php echo number_format(((int)$req['requested_minutes']) / 60, 2); ?> h</td>
                                     <td><?php echo htmlspecialchars($req['status']); ?></td>
@@ -3978,6 +4157,7 @@ include 'includes/header.php';
         var weekStatus = <?php echo json_encode((string)($timeClockScheduleWeekStatus['status'] ?? 'DRAFT')); ?>;
 
         var SLOT_MINUTES = 15;
+        var MIN_SHIFT_MINUTES = 30;
         var DAY_START_MINUTES = 6 * 60;
         var DAY_END_MINUTES = 23 * 60;
         var OPEN_START_MINUTES = 9 * 60;
@@ -4170,6 +4350,8 @@ include 'includes/header.php';
                         var height = ((endM - startM) / SLOT_MINUTES) * SLOT_PIXELS;
                         var c = getRoleColor(s.role_name || laneRole);
                         return '<div class="lane-shift-block" data-shift-id="' + s.shift_id + '" data-day="' + escapeHtml(dayYmd) + '" style="--lane-role-border:' + escapeHtml(c.border) + ';--lane-role-bg:' + escapeHtml(c.bg) + ';--lane-role-head:' + escapeHtml(c.head) + ';top:' + top + 'px;height:' + Math.max(10, height) + 'px;">'
+                            + '<button type="button" class="lane-shift-split" data-shift-id="' + s.shift_id + '" aria-label="Split shift" title="Split shift">Split</button>'
+                            + '<button type="button" class="lane-shift-delete" data-shift-id="' + s.shift_id + '" aria-label="Delete shift" title="Delete shift">x</button>'
                             + '<div class="lane-shift-handle lane-shift-handle-top" data-handle="start"></div>'
                             + '<div class="lane-shift-content">' + escapeHtml(formatTime(startM) + ' - ' + formatTime(endM)) + '</div>'
                             + '<div class="lane-shift-handle lane-shift-handle-bottom" data-handle="end"></div>'
@@ -4194,6 +4376,50 @@ include 'includes/header.php';
         var findShiftById = function (shiftId) { var sid = parseInt(shiftId || '0', 10) || 0; return shifts.find(function (s) { return s.shift_id === sid; }) || null; };
 
         boardEl.addEventListener('click', function (e) {
+            var splitBtn = e.target.closest('.lane-shift-split');
+            if (splitBtn) {
+                var shiftIdSplit = parseInt(splitBtn.getAttribute('data-shift-id') || '0', 10) || 0;
+                var blockSplit = splitBtn.closest('.lane-shift-block');
+                var dayYmdSplit = blockSplit ? (blockSplit.getAttribute('data-day') || '') : '';
+                var splitShift = findShiftById(shiftIdSplit);
+                if (!splitShift || !dayYmdSplit) return;
+                var splitStartM = roundToSlot(minutesFromDate(splitShift.start));
+                var splitEndM = roundToSlot(minutesFromDate(splitShift.end));
+                var splitDurationM = splitEndM - splitStartM;
+                if (splitDurationM < (MIN_SHIFT_MINUTES * 2)) {
+                    alert('Shift must be at least 60 minutes to split into two 30-minute blocks.');
+                    return;
+                }
+                var splitPointM = roundToSlot(splitStartM + Math.floor(splitDurationM / 2));
+                splitPointM = clamp(splitPointM, splitStartM + MIN_SHIFT_MINUTES, splitEndM - MIN_SHIFT_MINUTES);
+                var splitPointDate = new Date(startOfDay(dayYmdSplit).getTime() + (splitPointM * 60000));
+                postOp({
+                    operation: 'split',
+                    shift_id: splitShift.shift_id,
+                    split_local: asLocalInput(splitPointDate)
+                }).then(function (resSplit) {
+                    if (!resSplit || !resSplit.success) {
+                        alert((resSplit && resSplit.message) ? resSplit.message : 'Unable to split shift.');
+                        return;
+                    }
+                    window.location.reload();
+                }).catch(function () {
+                    alert('Network error while splitting shift.');
+                });
+                return;
+            }
+            var deleteBtn = e.target.closest('.lane-shift-delete');
+            if (deleteBtn) {
+                var shiftIdDeleteBtn = parseInt(deleteBtn.getAttribute('data-shift-id') || '0', 10) || 0;
+                if (shiftIdDeleteBtn <= 0) return;
+                if (!confirm('Delete this shift?')) return;
+                postOp({ operation: 'delete', shift_id: shiftIdDeleteBtn }).then(function (res) {
+                    if (!res || !res.success) { alert((res && res.message) ? res.message : 'Unable to delete shift.'); return; }
+                    shifts = shifts.filter(function (s) { return s.shift_id !== shiftIdDeleteBtn; });
+                    render();
+                }).catch(function () { alert('Network error while deleting shift.'); });
+                return;
+            }
             var addBtn = e.target.closest('.lane-day-add-btn');
             if (addBtn) {
                 var dayYmd = addBtn.getAttribute('data-day') || '';
@@ -4236,6 +4462,7 @@ include 'includes/header.php';
         });
 
         boardEl.addEventListener('mousedown', function (e) {
+            if (e.target.closest('.lane-shift-delete') || e.target.closest('.lane-shift-split')) return;
             var block = e.target.closest('.lane-shift-block');
             if (!block) return;
             var shiftId = parseInt(block.getAttribute('data-shift-id') || '0', 10) || 0;
@@ -4264,9 +4491,11 @@ include 'includes/header.php';
                 if (newStartM < DAY_START_MINUTES) { newStartM = DAY_START_MINUTES; newEndM = newStartM + dur; }
                 if (newEndM > DAY_END_MINUTES) { newEndM = DAY_END_MINUTES; newStartM = newEndM - dur; }
             } else if (dragState.mode === 'resize-start') {
-                newStartM = clamp(dragState.initialStartM + deltaM, DAY_START_MINUTES, dragState.initialEndM - SLOT_MINUTES);
+                var minResizeStart = (dragState.initialEndM - dragState.initialStartM) < MIN_SHIFT_MINUTES ? SLOT_MINUTES : MIN_SHIFT_MINUTES;
+                newStartM = clamp(dragState.initialStartM + deltaM, DAY_START_MINUTES, dragState.initialEndM - minResizeStart);
             } else {
-                newEndM = clamp(dragState.initialEndM + deltaM, dragState.initialStartM + SLOT_MINUTES, DAY_END_MINUTES);
+                var minResizeEnd = (dragState.initialEndM - dragState.initialStartM) < MIN_SHIFT_MINUTES ? SLOT_MINUTES : MIN_SHIFT_MINUTES;
+                newEndM = clamp(dragState.initialEndM + deltaM, dragState.initialStartM + minResizeEnd, DAY_END_MINUTES);
             }
             newStartM = roundToSlot(newStartM); newEndM = roundToSlot(newEndM);
             if (newEndM <= newStartM) newEndM = newStartM + SLOT_MINUTES;
@@ -5025,6 +5254,9 @@ include 'includes/header.php';
             titleEl.textContent = mode === 'month'
                 ? (monthTitle(anchor) + ' - ' + prettyDate(rangeStart) + ' to ' + prettyDate(rangeEnd))
                 : ('Week of ' + prettyDate(rangeStart) + ' - ' + prettyDate(rangeEnd));
+            if (employeeEl.getAttribute('data-locked-self') === '1') {
+                titleEl.textContent += ' (All locations)';
+            }
 
             var cells = [];
             var cursor = new Date(rangeStart.getTime());
@@ -5060,6 +5292,7 @@ include 'includes/header.php';
                         return '<div class="staff-calendar-shift">'
                             + '<strong>' + escapeHtml(s.role_name || 'Shift') + '</strong>'
                             + '<span>' + escapeHtml((s.start_time_label || '') + ' - ' + (s.end_time_label || '')) + '</span>'
+                            + '<small class="staff-calendar-shift-store">' + escapeHtml(s.store_name || '') + '</small>'
                             + '</div>';
                     }).join('');
                 } else if (dayPto) {
@@ -5384,6 +5617,45 @@ include 'includes/header.php';
             else activeModal.focus();
         }
     }, 200);
+})();
+
+(function () {
+    var usersPanel = document.getElementById('tc_panel_users');
+    if (!usersPanel) return;
+    var addRowBtn = document.getElementById('tc_user_add_row_btn');
+    var newRow = document.getElementById('tc_user_new_row');
+    var body = document.getElementById('tc_user_grid_body');
+    var buildFullName = function (first, last) {
+        var f = String(first || '').trim();
+        var l = String(last || '').trim();
+        return l ? (f + ' ' + l).trim() : f;
+    };
+    var attachNameSync = function (formId) {
+        var form = document.getElementById(formId);
+        if (!form) return;
+        form.addEventListener('submit', function () {
+            var first = usersPanel.querySelector('.tc-user-first-name[form="' + formId + '"]');
+            var last = usersPanel.querySelector('.tc-user-last-name[form="' + formId + '"]');
+            var hiddenFull = form.querySelector('input[name="full_name"]');
+            if (hiddenFull) {
+                hiddenFull.value = buildFullName(first ? first.value : '', last ? last.value : '');
+            }
+        });
+    };
+    attachNameSync('tc_user_create_form');
+    usersPanel.querySelectorAll('form[id^="tc_user_update_form_"]').forEach(function (f) {
+        attachNameSync(f.id);
+    });
+    if (addRowBtn && newRow && body) {
+        addRowBtn.addEventListener('click', function () {
+            newRow.hidden = false;
+            if (body.firstElementChild !== newRow) {
+                body.insertBefore(newRow, body.firstElementChild);
+            }
+            var firstInput = newRow.querySelector('.tc-user-first-name');
+            if (firstInput) firstInput.focus();
+        });
+    }
 })();
 
 (function () {
