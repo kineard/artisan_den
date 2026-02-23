@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="120" fill="#1d4ed8"/>
+  <rect x="64" y="64" width="384" height="384" rx="96" fill="#0f172a" opacity="0.2"/>
+  <text x="256" y="312" text-anchor="middle" font-family="Inter, Segoe UI, sans-serif" font-size="210" font-weight="700" fill="#ffffff">AD</text>
+</svg>

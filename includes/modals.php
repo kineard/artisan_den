@@ -1,6 +1,6 @@
 <!-- Product Modal -->
-<div id="productModal" class="modal" style="display: none;">
-    <div class="modal-content">
+<div id="productModal" class="modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="productModalTitle" aria-hidden="true">
+    <div class="modal-content" tabindex="-1">
         <div class="modal-header">
             <h3 id="productModalTitle">Add Product</h3>
             <button type="button" class="modal-close" onclick="closeProductModal()">&times;</button>
@@ -41,13 +41,16 @@
 </div>
 
 <!-- Vendor Modal -->
-<div id="vendorModal" class="modal" style="display: none;">
-    <div class="modal-content modal-large">
+<div id="vendorModal" class="modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="vendorModalTitle" aria-hidden="true">
+    <div class="modal-content modal-large" tabindex="-1">
         <div class="modal-header">
             <h3 id="vendorModalTitle">Add Vendor</h3>
             <button type="button" class="modal-close" onclick="closeVendorModal()">&times;</button>
         </div>
         <form method="POST" action="" id="vendorForm">
+            <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars(isset($inventoryLimit) ? $inventoryLimit : '10'); ?>">
+            <input type="hidden" name="inventory_days" value="<?php echo (int)($effectiveInventoryDays ?? 7); ?>">
+            <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
             <input type="hidden" name="vendor_id" id="vendor_id">
             <div class="modal-body">
                 <div class="form-row">
@@ -146,18 +149,19 @@
 </div>
 
 <!-- Inventory Edit Modal -->
-<div id="inventoryModal" class="modal" style="display: none;">
-    <div class="modal-content modal-large">
+<div id="inventoryModal" class="modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="inventory-modal-title" aria-hidden="true">
+    <div class="modal-content modal-large" tabindex="-1">
         <div class="modal-header">
             <h3 id="inventory-modal-title">Edit Inventory</h3>
             <button type="button" class="modal-close" onclick="closeInventoryModal()">&times;</button>
         </div>
         <form method="POST" action="" id="inventoryForm">
-            <input type="hidden" name="store_id" value="<?php echo $storeId; ?>">
+            <input type="hidden" name="store_id" value="<?php echo (int)$storeId; ?>">
             <input type="hidden" name="inventory_id" id="inventory_id">
+            <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '10'); ?>">
             <div class="form-group" id="inventory-product-selector" style="display: none;">
                 <label for="inventory_product_id_select">Product</label>
-                <select id="inventory_product_id_select" name="product_id" required>
+                <select id="inventory_product_id_select">
                     <option value="">Select Product...</option>
                     <?php 
                     // Get products not already in inventory for this store
@@ -175,6 +179,11 @@
             </div>
             <input type="hidden" name="product_id" id="inventory_product_id">
             <div class="modal-body">
+                <div class="form-group" id="inventory-edit-sku-row">
+                    <label for="product_sku">SKU/Barcode</label>
+                    <input type="text" id="product_sku" name="product_sku" maxlength="100" placeholder="Unique product ID" data-original-sku="">
+                    <small style="color: #666;">Must be unique. Changing it renames this product everywhere. You’ll be asked to confirm before saving.</small>
+                </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label for="on_hand">Initial quantity (on hand)</label>
@@ -195,7 +204,7 @@
                 <div class="form-row">
                     <div class="form-group">
                         <label for="reorder_point">Reorder Point (ROP)</label>
-                        <input type="number" id="reorder_point" name="reorder_point" step="0.001" value="0">
+                        <input type="number" id="reorder_point" name="reorder_point" step="1" min="0" value="0">
                         <small style="color: #000;">Auto-calculated if daily usage is set</small>
                     </div>
                     <div class="form-group">
@@ -228,11 +237,12 @@
                     </div>
                     <div class="form-group">
                         <label for="vendor_sku">Vendor SKU</label>
-                        <input type="text" id="vendor_sku" name="vendor_sku">
+                        <input type="text" id="vendor_sku" name="vendor_sku" placeholder="Vendor's catalog or product code">
+                        <small style="color: #666;">Vendor’s product code when ordering (may differ from your SKU/Barcode above)</small>
                     </div>
                     <div class="form-group">
                         <label for="lead_time_days">Lead Time (days)</label>
-                        <input type="number" id="lead_time_days" name="lead_time_days" value="0" onchange="calculateInventoryTargets()">
+                        <input type="number" id="lead_time_days" name="lead_time_days" step="1" min="0" value="0" onchange="calculateInventoryTargets()">
                     </div>
                 </div>
                 <div class="form-row">
@@ -259,18 +269,37 @@
 </div>
 
 <!-- Order Modal -->
-<div id="orderModal" class="modal" style="display: none;">
-    <div class="modal-content">
+<div id="orderModal" class="modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="orderModalTitle" aria-hidden="true">
+    <div class="modal-content" tabindex="-1">
         <div class="modal-header">
-            <h3>Create Order</h3>
+            <h3 id="orderModalTitle">Create Order</h3>
             <button type="button" class="modal-close" onclick="closeOrderModal()">&times;</button>
         </div>
         <form method="POST" action="" id="orderForm">
+            <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars(isset($inventoryLimit) ? $inventoryLimit : '10'); ?>">
+            <input type="hidden" name="inventory_days" value="<?php echo (int)($effectiveInventoryDays ?? 7); ?>">
+            <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
             <input type="hidden" name="store_id" value="<?php echo $storeId; ?>">
             <input type="hidden" name="order_id" id="order_id">
-            <input type="hidden" name="vendor_id" id="order_vendor_id">
-            <input type="hidden" name="product_id" id="order_product_id">
             <div class="modal-body">
+                <div class="form-group">
+                    <label for="order_product_id">Product *</label>
+                    <select id="order_product_id" name="product_id" required style="color: #000; background: #fff;">
+                        <option value="">— Select product —</option>
+                        <?php foreach ($products ?? [] as $p): ?>
+                        <option value="<?php echo (int)$p['id']; ?>"><?php echo htmlspecialchars($p['sku'] . ' – ' . $p['name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="order_vendor_id">Vendor *</label>
+                    <select id="order_vendor_id" name="vendor_id" required style="color: #000; background: #fff;">
+                        <option value="">— Select vendor —</option>
+                        <?php foreach ($vendors ?? [] as $v): ?>
+                        <option value="<?php echo (int)$v['id']; ?>"><?php echo htmlspecialchars($v['name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
                 <div class="form-group">
                     <label for="order_quantity">Quantity</label>
                     <input type="number" id="order_quantity" name="quantity" step="0.001" required>
@@ -306,6 +335,40 @@
             <div class="modal-footer">
                 <button type="button" class="btn" onclick="closeOrderModal()">Cancel</button>
                 <button type="submit" name="save_order" class="btn btn-primary">Save Order</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Receive Order Modal (confirm qty and date) -->
+<div id="receiveOrderModal" class="modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="receiveOrderModalTitle" aria-hidden="true">
+    <div class="modal-content" tabindex="-1">
+        <div class="modal-header">
+            <h3 id="receiveOrderModalTitle">Mark order received</h3>
+            <button type="button" class="modal-close" onclick="closeReceiveOrderModal()">&times;</button>
+        </div>
+        <form id="receiveOrderForm">
+            <input type="hidden" name="mark_received" value="1">
+            <input type="hidden" id="receive_order_id" name="order_id">
+            <input type="hidden" id="receive_product_id" name="product_id">
+            <input type="hidden" id="receive_store_id" name="store_id">
+            <div class="modal-body">
+                <p style="color: #000; margin-bottom: 12px;">Adjust quantity if you did not receive the full order (e.g. partial shipment).</p>
+                <p style="color: #000; margin: 0 0 10px; font-size: 12px;">
+                    Ordered qty: <strong id="receive_order_qty_label">0</strong>
+                </p>
+                <div class="form-group">
+                    <label for="receive_quantity">Quantity received</label>
+                    <input type="number" id="receive_quantity" name="quantity" step="1" min="0" required style="color: #000;">
+                </div>
+                <div class="form-group">
+                    <label for="receive_date">Date received</label>
+                    <input type="date" id="receive_date" name="received_date" value="<?php echo date('Y-m-d'); ?>" style="color: #000;">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn" onclick="closeReceiveOrderModal()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Mark received</button>
             </div>
         </form>
     </div>

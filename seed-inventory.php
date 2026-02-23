@@ -19,7 +19,7 @@ if (empty($stores)) {
 
 echo "Found " . count($stores) . " store(s)\n\n";
 
-// Sample products
+// Sample products (25 total so we can verify Top 10 / 15 / 20 / All)
 $products = [
     ['sku' => 'TOP10-ITEM-1', 'name' => 'NOVO 2X PODS', 'unit_type' => 'unit'],
     ['sku' => 'TOP10-ITEM-2', 'name' => 'DELTA FLOWER', 'unit_type' => 'gram'],
@@ -31,6 +31,21 @@ $products = [
     ['sku' => 'TOP10-ITEM-8', 'name' => 'CONCENTRATE JAR', 'unit_type' => 'gram'],
     ['sku' => 'TOP10-ITEM-9', 'name' => 'NOVO MASTER', 'unit_type' => 'unit'],
     ['sku' => 'TOP10-ITEM-10', 'name' => 'DELTA FLOWER X2', 'unit_type' => 'gram'],
+    ['sku' => 'TOP10-ITEM-11', 'name' => 'POD KIT STARTER', 'unit_type' => 'unit'],
+    ['sku' => 'TOP10-ITEM-12', 'name' => 'TINCTURE DROPS', 'unit_type' => 'unit'],
+    ['sku' => 'TOP10-ITEM-13', 'name' => 'CAPSULES BOTTLE', 'unit_type' => 'box'],
+    ['sku' => 'TOP10-ITEM-14', 'name' => 'LIVE RESIN CARTRIDGE', 'unit_type' => 'unit'],
+    ['sku' => 'TOP10-ITEM-15', 'name' => 'INFUSED PREROLL', 'unit_type' => 'box'],
+    ['sku' => 'TOP10-ITEM-16', 'name' => 'BATTERY KIT', 'unit_type' => 'unit'],
+    ['sku' => 'TOP10-ITEM-17', 'name' => 'WAX CONCENTRATE', 'unit_type' => 'gram'],
+    ['sku' => 'TOP10-ITEM-18', 'name' => 'SOFTGEL PACK', 'unit_type' => 'box'],
+    ['sku' => 'TOP10-ITEM-19', 'name' => 'DISPOSABLE 2ML', 'unit_type' => 'unit'],
+    ['sku' => 'TOP10-ITEM-20', 'name' => 'FLOWER EIGHTH', 'unit_type' => 'gram'],
+    ['sku' => 'TOP10-ITEM-21', 'name' => 'TOPICAL CREAM', 'unit_type' => 'unit'],
+    ['sku' => 'TOP10-ITEM-22', 'name' => 'VAPE PEN RECHARGE', 'unit_type' => 'unit'],
+    ['sku' => 'TOP10-ITEM-23', 'name' => 'GUMMY JAR', 'unit_type' => 'box'],
+    ['sku' => 'TOP10-ITEM-24', 'name' => 'BLENDED PREROLL', 'unit_type' => 'box'],
+    ['sku' => 'TOP10-ITEM-25', 'name' => 'CARTRIDGE 1G', 'unit_type' => 'unit'],
 ];
 
 // Sample vendors
@@ -222,7 +237,7 @@ foreach ($stores as $store) {
     echo "Seeding inventory for: {$store['name']} (ID: {$store['id']})\n";
     $inventoryCount = 0;
     
-    // Assign inventory items — all with 25 quantity so entering sales visibly updates On Hand
+    // Assign inventory items — all with 25 quantity so entering sales visibly updates On Hand (25 products for Top 10/15/20/All)
     $inventoryData = [
         ['sku' => 'TOP10-ITEM-1', 'on_hand' => 25, 'reorder_point' => 20, 'target_max' => 60, 'vendor' => 'VAPORBEAST', 'vendor_sku' => 'TEXT MESSAGE', 'lead_time' => 4, 'unit_cost' => 41.25],
         ['sku' => 'TOP10-ITEM-2', 'on_hand' => 25, 'reorder_point' => 50, 'target_max' => 226.5, 'vendor' => 'CALI EXTRA X', 'vendor_sku' => 'DELTA-FLWR', 'lead_time' => 1, 'unit_cost' => 8.50],
@@ -234,6 +249,21 @@ foreach ($stores as $store) {
         ['sku' => 'TOP10-ITEM-8', 'on_hand' => 25, 'reorder_point' => 20, 'target_max' => 60, 'vendor' => 'CALI EXTRA X', 'vendor_sku' => 'CONC-JAR', 'lead_time' => 2, 'unit_cost' => 35.00],
         ['sku' => 'TOP10-ITEM-9', 'on_hand' => 25, 'reorder_point' => 5, 'target_max' => 15, 'vendor' => 'VAPORBEAST', 'vendor_sku' => 'NOVO-M', 'lead_time' => 4, 'unit_cost' => 45.00],
         ['sku' => 'TOP10-ITEM-10', 'on_hand' => 25, 'reorder_point' => 50, 'target_max' => 226.5, 'vendor' => 'CALI EXTRA X', 'vendor_sku' => 'DELTA-FLWR-X2', 'lead_time' => 1, 'unit_cost' => 9.00],
+        ['sku' => 'TOP10-ITEM-11', 'on_hand' => 25, 'reorder_point' => 15, 'target_max' => 45, 'vendor' => 'AARNA', 'vendor_sku' => 'POD-KIT', 'lead_time' => 6, 'unit_cost' => 28.00],
+        ['sku' => 'TOP10-ITEM-12', 'on_hand' => 25, 'reorder_point' => 20, 'target_max' => 70, 'vendor' => 'VAPORBEAST', 'vendor_sku' => 'TINC-DRP', 'lead_time' => 4, 'unit_cost' => 19.00],
+        ['sku' => 'TOP10-ITEM-13', 'on_hand' => 25, 'reorder_point' => 12, 'target_max' => 35, 'vendor' => 'PANHANDLE WHOLESALE', 'vendor_sku' => 'CAP-BTL', 'lead_time' => 5, 'unit_cost' => 32.00],
+        ['sku' => 'TOP10-ITEM-14', 'on_hand' => 25, 'reorder_point' => 35, 'target_max' => 120, 'vendor' => 'CALI EXTRA X', 'vendor_sku' => 'LIVE-RES', 'lead_time' => 1, 'unit_cost' => 24.00],
+        ['sku' => 'TOP10-ITEM-15', 'on_hand' => 25, 'reorder_point' => 18, 'target_max' => 55, 'vendor' => 'VAPORBEAST', 'vendor_sku' => 'INF-PR', 'lead_time' => 4, 'unit_cost' => 16.50],
+        ['sku' => 'TOP10-ITEM-16', 'on_hand' => 25, 'reorder_point' => 10, 'target_max' => 30, 'vendor' => 'AARNA', 'vendor_sku' => 'BAT-KIT', 'lead_time' => 6, 'unit_cost' => 11.00],
+        ['sku' => 'TOP10-ITEM-17', 'on_hand' => 25, 'reorder_point' => 25, 'target_max' => 80, 'vendor' => 'CALI EXTRA X', 'vendor_sku' => 'WAX-CON', 'lead_time' => 2, 'unit_cost' => 42.00],
+        ['sku' => 'TOP10-ITEM-18', 'on_hand' => 25, 'reorder_point' => 14, 'target_max' => 42, 'vendor' => 'PANHANDLE WHOLESALE', 'vendor_sku' => 'SOFT-PK', 'lead_time' => 5, 'unit_cost' => 26.00],
+        ['sku' => 'TOP10-ITEM-19', 'on_hand' => 25, 'reorder_point' => 28, 'target_max' => 90, 'vendor' => 'VAPORBEAST', 'vendor_sku' => 'DISP-2ML', 'lead_time' => 4, 'unit_cost' => 14.00],
+        ['sku' => 'TOP10-ITEM-20', 'on_hand' => 25, 'reorder_point' => 40, 'target_max' => 150, 'vendor' => 'CALI EXTRA X', 'vendor_sku' => 'FLW-EIGHTH', 'lead_time' => 1, 'unit_cost' => 7.50],
+        ['sku' => 'TOP10-ITEM-21', 'on_hand' => 25, 'reorder_point' => 8, 'target_max' => 24, 'vendor' => 'AARNA', 'vendor_sku' => 'TOP-CRM', 'lead_time' => 6, 'unit_cost' => 38.00],
+        ['sku' => 'TOP10-ITEM-22', 'on_hand' => 25, 'reorder_point' => 22, 'target_max' => 65, 'vendor' => 'VAPORBEAST', 'vendor_sku' => 'PEN-RCH', 'lead_time' => 4, 'unit_cost' => 21.00],
+        ['sku' => 'TOP10-ITEM-23', 'on_hand' => 25, 'reorder_point' => 16, 'target_max' => 48, 'vendor' => 'PANHANDLE WHOLESALE', 'vendor_sku' => 'GUM-JAR', 'lead_time' => 5, 'unit_cost' => 29.00],
+        ['sku' => 'TOP10-ITEM-24', 'on_hand' => 25, 'reorder_point' => 19, 'target_max' => 58, 'vendor' => 'CALI EXTRA X', 'vendor_sku' => 'BLND-PR', 'lead_time' => 2, 'unit_cost' => 17.00],
+        ['sku' => 'TOP10-ITEM-25', 'on_hand' => 25, 'reorder_point' => 32, 'target_max' => 100, 'vendor' => 'VAPORBEAST', 'vendor_sku' => 'CART-1G', 'lead_time' => 4, 'unit_cost' => 20.00],
     ];
     
     foreach ($inventoryData as $inv) {

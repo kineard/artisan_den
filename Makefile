@@ -1,4 +1,4 @@
-.PHONY: dev start stop help check-db seed
+.PHONY: dev start stop help check-db seed migrate-timeclock seed-timeclock
 
 # Default port
 PORT ?= 8001
@@ -43,10 +43,20 @@ migrate-inventory: check-db
 	@echo "Running inventory schema updates..."
 	@PGPASSWORD=artisan_pass_123 psql -h localhost -U artisan_user -d artisan_den -f database/migrate-inventory-updates.sql || echo "Migration may have already run"
 
+# Migrate Time Clock schema
+migrate-timeclock: check-db
+	@echo "Running Time Clock schema migration..."
+	@PGPASSWORD=artisan_pass_123 psql -h localhost -U artisan_user -d artisan_den -f database/migrate-timeclock.sql
+
 # Fix schema and seed inventory data (recommended)
 seed-inventory: check-db
 	@echo "Fixing schema and seeding inventory data..."
 	@php fix-and-seed.php
+
+# Seed demo Time Clock employees + assignments
+seed-timeclock: check-db migrate-timeclock
+	@echo "Seeding Time Clock demo employees..."
+	@php seed-timeclock.php
 
 # Show help
 help:
@@ -56,6 +66,8 @@ help:
 	@echo "  make stop          - Stop the PHP development server"
 	@echo "  make seed          - Seed database with sample KPI data"
 	@echo "  make seed-inventory - Seed database with inventory, products, and vendors"
+	@echo "  make migrate-timeclock - Run Time Clock schema migration"
+	@echo "  make seed-timeclock - Seed Time Clock demo employees and PINs"
 	@echo "  make help          - Show this help message"
 	@echo ""
 	@echo "To use a different port: PORT=8080 make dev"
