@@ -1,5 +1,16 @@
 # Config (may contain DB credentials)
 config.php
+.env
+.env.local
+.env
+.env.local
+.env
+.env.local
+.env
+.env.local
+.env.local
+.env
+.env.local
 
 # Logs and debug
 *.log
