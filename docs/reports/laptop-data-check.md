@@ -10,20 +10,17 @@
 | Table | Exists | Rows |
 |-------|--------|------|
 | stores | 1 | 2 |
-| daily_kpis | 1 | (varies) |
-| vendors | 1 | (varies) |
-| products | 1 | (varies) |
-| inventory | 1 | (varies) |
-| orders | 1 | (varies) |
-| employees | 1 | (varies) |
-| employee_locations | 1 | (varies) |
-| time_shifts | 1 | (varies) |
-| time_punch_events | 1 | (varies) |
-
-*Note: Row counts from dev-environment-report (stores=2). Run `make laptop-check` in WSL for live counts.*
+| daily_kpis | 1 | 106 |
+| vendors | 1 | 15 |
+| products | 1 | 782 |
+| inventory | 1 | 1554 |
+| orders | 1 | 76 |
+| employees | 1 | 4 |
+| employee_locations | 1 | 6 |
+| time_shifts | 1 | 3 |
+| time_punch_events | 1 | 3 |
 
 ## Missing Tables
-None (all tables exist per schema/seed scripts).
 
 ## Schema & Seed Scripts
 | Script | Exists | Covers |
@@ -36,7 +33,5 @@ None (all tables exist per schema/seed scripts).
 
 ## Export
 - **File:** artifacts/legacy-export/legacy-pos-tables.sql
-- **Export UTC:** 2025-02-28T00:00:00Z (run `make laptop-check` for timestamp)
-- **Created:** run `make laptop-check` in WSL to generate via pg_dump (creates if missing)
-
-**To refresh with live data:** Run `make laptop-check` or `bash run-laptop-check.sh` in WSL.
+- **Export UTC:** 2026-02-28T21:23:13Z
+- **Created:** already existed
