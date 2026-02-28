@@ -1,0 +1,4 @@
+--
+-- Legacy POS Tables Export (placeholder)
+-- Run in WSL: make laptop-check
+-- Or: PGPASSWORD=artisan_pass_123 pg_dump -h localhost -U artisan_user -d artisan_den --no-owner --no-privileges -t stores -t daily_kpis -t vendors -t products -t inventory -t orders -t employees -t employee_locations -t time_shifts -t time_punch_events > artifacts/legacy-export/legacy-pos-tables.sql

@@ -934,10 +934,17 @@ $products = [];
 $vendors = [];
 $orders = [];
 $inventorySort = $_GET['inventory_sort'] ?? 'status';
-$inventoryLimit = $_GET['inventory_limit'] ?? '10';
-if (!in_array($inventoryLimit, ['10', '15', '20', 'all'], true)) {
-    $inventoryLimit = '10';
+$allowedInventorySorts = ['status', 'suggested_order', 'vendor_rating', 'avg_7day_sales', 'top_sellers_7d', 'top_sellers_30d', 'aging_30d', 'aging_60d', 'product_name'];
+if (!in_array($inventorySort, $allowedInventorySorts, true)) {
+    $inventorySort = 'status';
 }
+$inventoryLimit = $_GET['inventory_limit'] ?? '30';
+if (!in_array($inventoryLimit, ['10', '15', '20', '30', 'all'], true)) {
+    $inventoryLimit = '30';
+}
+$inventoryCategory = trim((string)($_GET['inventory_category'] ?? 'all'));
+$inventoryUnitType = trim((string)($_GET['inventory_unit_type'] ?? 'all'));
+$inventoryFilterOptions = ['categories' => [], 'unit_types' => []];
 // Effective inventory table "days" for preserving state in forms/redirects (1–30)
 $effectiveInventoryDays = ($inventoryDays !== null) ? max(1, min(30, $inventoryDays)) : (($view === 'custom') ? max(1, min(30, (int)($customDays ?? 7))) : (($view === 'month') ? 30 : 7));
 $snapshotsMap = [];
@@ -945,10 +952,68 @@ $receivedMap = [];
 $salesMap = [];
 $purchasesMap = [];
 $extrapolatedSales = [];
+$inventorySalesRankingSource = 'all_products';
+$inventoryParityStatus = 'unknown';
+$inventoryParityMessage = 'Ranking readiness not available yet.';
+$inventoryParityMappedCount = 0;
+$inventoryParityTotalCount = 0;
+$inventoryParityMappedWithSales30Count = 0;
+$inventoryParityWithSales30Count = 0;
+$inventoryParityReadyToRemoveFallback = false;
+$inventoryParityReadyThresholdPct = 90;
+$inventoryParityReadySalesThresholdPct = 70;
+$inventoryParityReadinessText = 'No';
+$lightspeedSyncLatestByEntity = [];
+$lightspeedSyncLatestRuns = [];
+$lightspeedSyncWatchedEntities = ['product_categories', 'products', 'suppliers', 'outlets', 'inventory'];
+$lightspeedSyncHealthStatus = 'unknown';
+$lightspeedSyncHealthMessage = 'No sync runs recorded yet.';
+$lightspeedSyncStaleThresholdHours = 12;
+$lightspeedSyncOldestWatchedHours = null;
+$lightspeedSyncMissingEntities = [];
+$lightspeedSyncFailedEntities = [];
 if ($storeId && $isKpiAction) {
     try {
+        $inventoryFilterOptions = getInventoryFilterOptionsForStore($storeId);
         // Get inventory items (sorted by user preference for inventory list)
-        $inventoryItems = getInventoryForStore($storeId, $inventorySort);
+        $inventoryItems = getInventoryForStore($storeId, $inventorySort, [
+            'category' => $inventoryCategory,
+            'unit_type' => $inventoryUnitType,
+        ]);
+        if (!empty($inventoryItems)) {
+            $inventorySalesRankingSource = (string)($inventoryItems[0]['sales_rank_source'] ?? 'all_products');
+        }
+        $inventoryItemsFull = $inventoryItems;
+        $inventoryParityTotalCount = count($inventoryItemsFull);
+        foreach ($inventoryItemsFull as $invItem) {
+            $isMapped = !empty($invItem['is_lightspeed_mapped']);
+            $sales30 = (float)($invItem['sales_30day_total'] ?? 0);
+            if ($isMapped) {
+                $inventoryParityMappedCount++;
+                if ($sales30 > 0) {
+                    $inventoryParityMappedWithSales30Count++;
+                }
+            }
+            if ($sales30 > 0) {
+                $inventoryParityWithSales30Count++;
+            }
+        }
+        $mappedPct = $inventoryParityTotalCount > 0 ? (int)round(($inventoryParityMappedCount / $inventoryParityTotalCount) * 100) : 0;
+        $mappedSalesPct = $inventoryParityMappedCount > 0 ? (int)round(($inventoryParityMappedWithSales30Count / $inventoryParityMappedCount) * 100) : 0;
+        $inventoryParityReadyToRemoveFallback = ($mappedPct >= $inventoryParityReadyThresholdPct)
+            && ($mappedSalesPct >= $inventoryParityReadySalesThresholdPct)
+            && ($inventorySalesRankingSource === 'lightspeed_mapped');
+        $inventoryParityReadinessText = $inventoryParityReadyToRemoveFallback ? 'Yes' : 'No';
+        if ($inventorySalesRankingSource === 'lightspeed_mapped') {
+            $inventoryParityStatus = 'ok';
+            $inventoryParityMessage = 'Ranking source: Lightspeed mapped products (' . $inventoryParityMappedWithSales30Count . ' mapped items with 30D sales, ' . $mappedPct . '% mapped coverage, ' . $mappedSalesPct . '% mapped-sales coverage).';
+        } elseif ($inventorySalesRankingSource === 'all_products_fallback') {
+            $inventoryParityStatus = 'warning';
+            $inventoryParityMessage = 'Ranking source: fallback (all products). Mapped coverage: ' . $mappedPct . '% (' . $inventoryParityMappedCount . '/' . $inventoryParityTotalCount . ').';
+        } else {
+            $inventoryParityStatus = 'warning';
+            $inventoryParityMessage = 'Ranking source: mixed/unset. Mapped coverage: ' . $mappedPct . '% (' . $inventoryParityMappedCount . '/' . $inventoryParityTotalCount . ').';
+        }
         if ($inventoryLimit !== 'all') {
             $limitNum = (int) $inventoryLimit;
             $inventoryItems = array_slice($inventoryItems, 0, $limitNum);
@@ -956,6 +1021,45 @@ if ($storeId && $isKpiAction) {
         $products = getAllProducts();
         $vendors = getAllVendors();
         $orders = getOrdersForStore($storeId);
+        $lightspeedSyncLatestByEntity = getLightspeedSyncLatestRunByEntity();
+        $lightspeedSyncLatestRuns = getLightspeedSyncLatestRuns(8);
+        foreach ($lightspeedSyncWatchedEntities as $entityName) {
+            $row = $lightspeedSyncLatestByEntity[$entityName] ?? null;
+            if (!$row) {
+                $lightspeedSyncMissingEntities[] = $entityName;
+                continue;
+            }
+            $entityStatus = strtoupper(trim((string)($row['status'] ?? '')));
+            if (in_array($entityStatus, ['FAILED', 'COMPLETED_WITH_ERRORS'], true)) {
+                $lightspeedSyncFailedEntities[] = $entityName;
+            }
+            $endedAtRaw = trim((string)($row['ended_at'] ?? $row['started_at'] ?? ''));
+            if ($endedAtRaw !== '') {
+                $endedTs = strtotime($endedAtRaw);
+                if ($endedTs !== false) {
+                    $ageHours = (time() - $endedTs) / 3600;
+                    if ($lightspeedSyncOldestWatchedHours === null || $ageHours > $lightspeedSyncOldestWatchedHours) {
+                        $lightspeedSyncOldestWatchedHours = $ageHours;
+                    }
+                }
+            }
+        }
+        if (empty($lightspeedSyncLatestByEntity)) {
+            $lightspeedSyncHealthStatus = 'unknown';
+            $lightspeedSyncHealthMessage = 'No Lightspeed sync history found.';
+        } elseif (!empty($lightspeedSyncFailedEntities)) {
+            $lightspeedSyncHealthStatus = 'error';
+            $lightspeedSyncHealthMessage = 'Issues detected in: ' . implode(', ', $lightspeedSyncFailedEntities) . '.';
+        } elseif (!empty($lightspeedSyncMissingEntities)) {
+            $lightspeedSyncHealthStatus = 'warning';
+            $lightspeedSyncHealthMessage = 'Missing sync runs for: ' . implode(', ', $lightspeedSyncMissingEntities) . '.';
+        } elseif ($lightspeedSyncOldestWatchedHours !== null && $lightspeedSyncOldestWatchedHours > $lightspeedSyncStaleThresholdHours) {
+            $lightspeedSyncHealthStatus = 'warning';
+            $lightspeedSyncHealthMessage = 'Sync data is stale (' . (int)round($lightspeedSyncOldestWatchedHours) . 'h old).';
+        } else {
+            $lightspeedSyncHealthStatus = 'ok';
+            $lightspeedSyncHealthMessage = 'Lightspeed sync looks healthy.';
+        }
         if (!empty($dateArray) && isset($startDate) && isset($endDate)) {
             $dataStart = $startDate;
             $dataEnd = $endDate;
@@ -973,7 +1077,10 @@ if ($storeId && $isKpiAction) {
         }
         
         // For daily on-hand grid, sort by 7-day average (top sellers first)
-        $dailyOnHandItems = getInventoryForStore($storeId, 'avg_7day_sales');
+        $dailyOnHandItems = getInventoryForStore($storeId, 'avg_7day_sales', [
+            'category' => $inventoryCategory,
+            'unit_type' => $inventoryUnitType,
+        ]);
     } catch (Exception $e) {
         error_log("Error loading inventory data: " . $e->getMessage());
     }
@@ -1051,11 +1158,29 @@ include 'includes/header.php';
             <p>Run: <code>make seed</code> or set up the database using <code>setup-db.sh</code></p>
         </div>
     <?php else: ?>
+    <?php
+        $storesForHeader = $stores;
+        usort($storesForHeader, function ($a, $b) use ($storeId) {
+            $aId = (int)($a['id'] ?? 0);
+            $bId = (int)($b['id'] ?? 0);
+            $aActive = $aId === (int)$storeId;
+            $bActive = $bId === (int)$storeId;
+            if ($aActive && !$bActive) {
+                return -1;
+            }
+            if (!$aActive && $bActive) {
+                return 1;
+            }
+            $aName = (string)($a['name'] ?? '');
+            $bName = (string)($b['name'] ?? '');
+            return strcasecmp($aName, $bName);
+        });
+    ?>
     <div class="header app-hero">
         <div>
             <div class="store-info">Store: <strong><?php echo htmlspecialchars($currentStore['name'] ?? 'N/A'); ?></strong></div>
             <div class="store-selector">
-                <?php foreach ($stores as $store): ?>
+                <?php foreach ($storesForHeader as $store): ?>
                     <a href="?action=<?php echo $action; ?>&store=<?php echo $store['id']; ?>&date=<?php echo $date; ?>&view=<?php echo $view; ?>&tab=<?php echo htmlspecialchars($dashboardTab); ?>" class="store-pill <?php echo ($store['id'] == $storeId) ? 'active' : ''; ?>" data-store-id="<?php echo $store['id']; ?>"><?php echo htmlspecialchars($store['name']); ?></a>
                 <?php endforeach; ?>
             </div>
@@ -1086,8 +1211,39 @@ include 'includes/header.php';
                     <input type="hidden" name="view" value="<?php echo htmlspecialchars($view ?? 'week'); ?>">
                     <input type="hidden" name="tab" value="inventory">
                     <input type="hidden" name="mode" value="view">
-                    <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '10'); ?>">
+                    <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '30'); ?>">
+                    <?php if ($view === 'custom'): ?>
+                    <input type="hidden" name="days" value="<?php echo (int)$customDays; ?>">
+                    <?php endif; ?>
+                    <?php if ($inventoryDays !== null): ?>
+                    <input type="hidden" name="inventory_days" value="<?php echo (int)$inventoryDays; ?>">
+                    <?php endif; ?>
+                    <input type="hidden" name="inventory_category" value="<?php echo htmlspecialchars($inventoryCategory ?? 'all'); ?>">
+                    <input type="hidden" name="inventory_unit_type" value="<?php echo htmlspecialchars($inventoryUnitType ?? 'all'); ?>">
+                    <label for="inventory_sort_hero">Sort:</label>
+                    <select name="inventory_sort" id="inventory_sort_hero" onchange="this.form.submit()">
+                        <option value="status" <?php echo $inventorySort === 'status' ? ' selected' : ''; ?>>Status</option>
+                        <option value="top_sellers_30d" <?php echo $inventorySort === 'top_sellers_30d' ? ' selected' : ''; ?>>Top Sellers 30D</option>
+                        <option value="top_sellers_7d" <?php echo $inventorySort === 'top_sellers_7d' ? ' selected' : ''; ?>>Top Sellers 7D</option>
+                        <option value="aging_30d" <?php echo $inventorySort === 'aging_30d' ? ' selected' : ''; ?>>Aging 30D</option>
+                        <option value="aging_60d" <?php echo $inventorySort === 'aging_60d' ? ' selected' : ''; ?>>Aging 60D</option>
+                        <option value="suggested_order" <?php echo $inventorySort === 'suggested_order' ? ' selected' : ''; ?>>Suggested Order</option>
+                        <option value="vendor_rating" <?php echo $inventorySort === 'vendor_rating' ? ' selected' : ''; ?>>Vendor Rating</option>
+                        <option value="avg_7day_sales" <?php echo $inventorySort === 'avg_7day_sales' ? ' selected' : ''; ?>>Avg 7D Sales</option>
+                        <option value="product_name" <?php echo $inventorySort === 'product_name' ? ' selected' : ''; ?>>Product Name</option>
+                    </select>
+                </form>
+                <form method="get" action="index.php" class="inventory-hero-form">
+                    <input type="hidden" name="action" value="dashboard">
+                    <input type="hidden" name="store" value="<?php echo (int)$storeId; ?>">
+                    <input type="hidden" name="date" value="<?php echo htmlspecialchars($date ?? ''); ?>">
+                    <input type="hidden" name="view" value="<?php echo htmlspecialchars($view ?? 'week'); ?>">
+                    <input type="hidden" name="tab" value="inventory">
+                    <input type="hidden" name="mode" value="view">
+                    <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '30'); ?>">
                     <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
+                    <input type="hidden" name="inventory_category" value="<?php echo htmlspecialchars($inventoryCategory ?? 'all'); ?>">
+                    <input type="hidden" name="inventory_unit_type" value="<?php echo htmlspecialchars($inventoryUnitType ?? 'all'); ?>">
                     <?php if ($view === 'custom'): ?>
                     <input type="hidden" name="days" value="<?php echo (int)$customDays; ?>">
                     <?php endif; ?>
@@ -1110,22 +1266,48 @@ include 'includes/header.php';
                     <input type="hidden" name="tab" value="inventory">
                     <input type="hidden" name="mode" value="view">
                     <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
+                    <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '30'); ?>">
+                    <input type="hidden" name="inventory_unit_type" value="<?php echo htmlspecialchars($inventoryUnitType ?? 'all'); ?>">
                     <?php if ($view === 'custom'): ?>
                     <input type="hidden" name="days" value="<?php echo (int)$customDays; ?>">
                     <?php endif; ?>
                     <?php if ($inventoryDays !== null): ?>
                     <input type="hidden" name="inventory_days" value="<?php echo (int)$inventoryDays; ?>">
                     <?php endif; ?>
-                    <label for="inventory_limit_hero">Show:</label>
-                    <select name="inventory_limit" id="inventory_limit_hero" onchange="this.form.submit()">
-                        <option value="10" <?php echo $inventoryLimit === '10' ? ' selected' : ''; ?>>Top 10</option>
-                        <option value="15" <?php echo $inventoryLimit === '15' ? ' selected' : ''; ?>>Top 15</option>
-                        <option value="20" <?php echo $inventoryLimit === '20' ? ' selected' : ''; ?>>Top 20</option>
-                        <option value="all" <?php echo $inventoryLimit === 'all' ? ' selected' : ''; ?>>All</option>
+                    <label for="inventory_category_hero">Category:</label>
+                    <select name="inventory_category" id="inventory_category_hero" onchange="this.form.submit()">
+                        <option value="all" <?php echo (($inventoryCategory ?? 'all') === 'all') ? ' selected' : ''; ?>>All</option>
+                        <?php foreach ((array)($inventoryFilterOptions['categories'] ?? []) as $catOpt): ?>
+                            <option value="<?php echo htmlspecialchars($catOpt); ?>" <?php echo strcasecmp((string)$inventoryCategory, (string)$catOpt) === 0 ? ' selected' : ''; ?>><?php echo htmlspecialchars($catOpt); ?></option>
+                        <?php endforeach; ?>
                     </select>
                 </form>
-                <button type="button" class="btn btn-primary inventory-hero-btn" onclick="openOrderModal()" title="Create a new order (choose product and vendor)">+ Add Order</button>
+                <form method="get" action="index.php" class="inventory-hero-form">
+                    <input type="hidden" name="action" value="dashboard">
+                    <input type="hidden" name="store" value="<?php echo (int)$storeId; ?>">
+                    <input type="hidden" name="date" value="<?php echo htmlspecialchars($date ?? ''); ?>">
+                    <input type="hidden" name="view" value="<?php echo htmlspecialchars($view ?? 'week'); ?>">
+                    <input type="hidden" name="tab" value="inventory">
+                    <input type="hidden" name="mode" value="view">
+                    <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
+                    <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '30'); ?>">
+                    <input type="hidden" name="inventory_category" value="<?php echo htmlspecialchars($inventoryCategory ?? 'all'); ?>">
+                    <?php if ($view === 'custom'): ?>
+                    <input type="hidden" name="days" value="<?php echo (int)$customDays; ?>">
+                    <?php endif; ?>
+                    <?php if ($inventoryDays !== null): ?>
+                    <input type="hidden" name="inventory_days" value="<?php echo (int)$inventoryDays; ?>">
+                    <?php endif; ?>
+                    <label for="inventory_unit_type_hero">Unit:</label>
+                    <select name="inventory_unit_type" id="inventory_unit_type_hero" onchange="this.form.submit()">
+                        <option value="all" <?php echo (($inventoryUnitType ?? 'all') === 'all') ? ' selected' : ''; ?>>All</option>
+                        <?php foreach ((array)($inventoryFilterOptions['unit_types'] ?? []) as $unitOpt): ?>
+                            <option value="<?php echo htmlspecialchars($unitOpt); ?>" <?php echo strcasecmp((string)$inventoryUnitType, (string)$unitOpt) === 0 ? ' selected' : ''; ?>><?php echo htmlspecialchars($unitOpt); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </form>
                 <button type="button" class="btn btn-primary inventory-hero-btn" onclick="showProductModal()">+ Add Product</button>
+                <button type="button" class="btn btn-primary inventory-hero-btn" onclick="openOrderModal()" title="Create a new order (choose product and vendor)">+ Add Order</button>
                 <button type="button" class="btn btn-primary inventory-hero-btn" onclick="showVendorModal()">+ Add Vendor</button>
                 <?php if ($canWriteInventory && !empty($vendors)): ?>
                 <?php
@@ -1133,7 +1315,6 @@ include 'includes/header.php';
                 usort($vendorsSorted, function ($a, $b) { return strcasecmp($a['name'] ?? '', $b['name'] ?? ''); });
                 ?>
                 <div class="vendor-edit-dropdown inventory-hero-vendor-edit">
-                    <div class="vendor-edit-label">Edit Vendor</div>
                     <button type="button" class="btn btn-vendor-edit" onclick="toggleVendorEditDropdown()" title="Choose a vendor to edit">Choose vendor <span class="dropdown-arrow">▼</span></button>
                     <div id="vendor-edit-dropdown-menu" class="vendor-edit-dropdown-menu" role="listbox">
                         <?php foreach ($vendorsSorted as $v): ?>
@@ -1144,8 +1325,9 @@ include 'includes/header.php';
                 <?php endif; ?>
             </div>
             <?php endif; ?>
-        </div>
     </div>
+    </div>
+    <?php endif; ?>
     <?php if ($dashboardTab === 'kpi'): ?>
     <?php
         $todayYmd = (new DateTime('now', new DateTimeZone(TIMEZONE)))->format('Y-m-d');
@@ -1189,7 +1371,7 @@ include 'includes/header.php';
         <input type="hidden" name="view" value="<?php echo $view; ?>">
         <input type="hidden" name="kpi_mode" value="<?php echo htmlspecialchars($kpiMode); ?>">
         <input type="hidden" name="tab" value="<?php echo htmlspecialchars($dashboardTab); ?>">
-        <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '10'); ?>">
+        <input type="hidden" name="inventory_limit" value="<?php echo htmlspecialchars($inventoryLimit ?? '30'); ?>">
         <input type="hidden" name="inventory_days" value="<?php echo (int)$effectiveInventoryDays; ?>">
         <input type="hidden" name="inventory_sort" value="<?php echo htmlspecialchars($inventorySort ?? 'status'); ?>">
         <input type="hidden" name="bulk_save" value="1">
@@ -1397,6 +1579,39 @@ include 'includes/header.php';
     <!-- Inventory Management Section -->
     <?php if ($dashboardTab === 'inventory' && $storeId && $isKpiAction): ?>
     <div class="inventory-container">
+        <div class="inventory-sync-health inventory-sync-health-<?php echo htmlspecialchars($lightspeedSyncHealthStatus); ?>">
+            <div class="inventory-sync-health-head">
+                <strong>Lightspeed Sync Health</strong>
+                <span><?php echo htmlspecialchars((string)$lightspeedSyncHealthMessage); ?></span>
+            </div>
+            <div class="inventory-sync-health-parity inventory-sync-health-parity-<?php echo htmlspecialchars($inventoryParityStatus); ?>">
+                <strong>Ranking readiness</strong>
+                <span><?php echo htmlspecialchars((string)$inventoryParityMessage); ?></span>
+                <span class="inventory-sync-readiness-chip <?php echo $inventoryParityReadyToRemoveFallback ? 'is-ready' : 'is-not-ready'; ?>">
+                    Ready to remove fallback: <?php echo htmlspecialchars($inventoryParityReadinessText); ?>
+                </span>
+            </div>
+            <div class="inventory-sync-health-meta">
+                <?php foreach ($lightspeedSyncWatchedEntities as $entityName): ?>
+                    <?php $syncRow = $lightspeedSyncLatestByEntity[$entityName] ?? null; ?>
+                    <span class="inventory-sync-chip">
+                        <?php if ($syncRow): ?>
+                            <?php
+                                $chipStatus = strtoupper(trim((string)($syncRow['status'] ?? 'UNKNOWN')));
+                                $chipEndedAt = trim((string)($syncRow['ended_at'] ?? $syncRow['started_at'] ?? ''));
+                            ?>
+                            <strong><?php echo htmlspecialchars($entityName); ?></strong>
+                            <em><?php echo htmlspecialchars($chipStatus); ?></em>
+                            <small><?php echo htmlspecialchars($chipEndedAt !== '' ? formatDateTimeForUser($chipEndedAt, '-') : '-'); ?></small>
+                        <?php else: ?>
+                            <strong><?php echo htmlspecialchars($entityName); ?></strong>
+                            <em>MISSING</em>
+                            <small>-</small>
+                        <?php endif; ?>
+                    </span>
+                <?php endforeach; ?>
+            </div>
+        </div>
         <div class="inventory-header">
             <h2>
                 <button type="button" class="collapse-toggle" onclick="toggleInventoryCollapse()">
@@ -1454,8 +1669,8 @@ include 'includes/header.php';
 
     <?php endif; ?>
     
-    <?php endif; // end storeId/empty stores check (closes line 115) ?>
-<?php elseif ($isTimeclockAction): ?>
+<?php endif; // end KPI action block ?>
+<?php if ($isTimeclockAction): ?>
     <?php
     $requestedPanel = (string)($_GET['panel'] ?? '');
     $resolvedPanel = $requestedPanel;
@@ -5499,7 +5714,8 @@ include 'includes/header.php';
     })();
     </script>
     <?php endif; ?>
-<?php elseif ($action === 'history'): ?>
+<?php endif; // end timeclock action block ?>
+<?php if ($action === 'history'): ?>
     <div class="header app-hero">
         <h1>Historical KPI Data</h1>
         <p class="app-hero-subtitle">Review trend history across stores and date ranges.</p>
@@ -5534,7 +5750,7 @@ include 'includes/header.php';
             </tbody>
         </table>
     </div>
-<?php endif; // end KPI action block ?>
+<?php endif; // end history block ?>
 <script>
 (function () {
     var toasts = document.querySelectorAll('.js-toast');

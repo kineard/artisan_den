@@ -172,9 +172,53 @@ function deleteVendor($id) {
 }
 
 // Inventory functions
-function getInventoryForStore($storeId, $sortBy = 'status') {
+function getInventoryFilterOptionsForStore($storeId) {
     try {
         $pdo = getDB();
+        $storeId = (int)$storeId;
+        if ($storeId <= 0) {
+            return ['categories' => [], 'unit_types' => []];
+        }
+
+        $categoriesStmt = $pdo->prepare("
+            SELECT DISTINCT pc.name
+            FROM inventory i
+            JOIN product_category_map pcm ON pcm.product_id = i.product_id
+            JOIN product_categories pc ON pc.id = pcm.category_id
+            WHERE i.store_id = ?
+              AND COALESCE(TRIM(pc.name), '') <> ''
+            ORDER BY pc.name ASC
+        ");
+        $categoriesStmt->execute([$storeId]);
+        $categories = array_values(array_filter(array_map(function ($row) {
+            return trim((string)($row['name'] ?? ''));
+        }, $categoriesStmt->fetchAll(PDO::FETCH_ASSOC))));
+
+        $unitStmt = $pdo->prepare("
+            SELECT DISTINCT p.unit_type
+            FROM inventory i
+            JOIN products p ON p.id = i.product_id
+            WHERE i.store_id = ?
+              AND COALESCE(TRIM(p.unit_type), '') <> ''
+            ORDER BY p.unit_type ASC
+        ");
+        $unitStmt->execute([$storeId]);
+        $unitTypes = array_values(array_filter(array_map(function ($row) {
+            return trim((string)($row['unit_type'] ?? ''));
+        }, $unitStmt->fetchAll(PDO::FETCH_ASSOC))));
+
+        return ['categories' => $categories, 'unit_types' => $unitTypes];
+    } catch (Throwable $e) {
+        error_log('getInventoryFilterOptionsForStore error: ' . $e->getMessage());
+        return ['categories' => [], 'unit_types' => []];
+    }
+}
+
+function getInventoryForStore($storeId, $sortBy = 'status', array $filters = []) {
+    try {
+        $pdo = getDB();
+        $filterCategory = trim((string)($filters['category'] ?? ''));
+        $filterUnitType = trim((string)($filters['unit_type'] ?? ''));
         
         // Build ORDER BY clause based on sortBy
         $orderBy = 'p.name ASC';
@@ -194,6 +238,13 @@ function getInventoryForStore($storeId, $sortBy = 'status') {
                 break;
             case 'avg_7day_sales':
                 $orderBy = 'avg_7day DESC NULLS LAST, p.name ASC';
+                break;
+            case 'top_sellers_7d':
+            case 'top_sellers_30d':
+            case 'aging_30d':
+            case 'aging_60d':
+                // Derived from daily sales history after rows are loaded.
+                $orderBy = 'p.name ASC';
                 break;
             case 'product_name':
             default:
@@ -217,25 +268,80 @@ function getInventoryForStore($storeId, $sortBy = 'status') {
         $asOfDate = date('Y-m-d');
         $averages = getProductAveragesForStore($storeId, $asOfDate);
         
-        // For avg_7day_sales sort, we need to sort in PHP after adding averages
-        $needsPhpSort = ($sortBy === 'avg_7day_sales');
+        // Some sort modes depend on computed values not directly in inventory rows.
+        $needsPhpSort = in_array($sortBy, ['avg_7day_sales', 'top_sellers_7d', 'top_sellers_30d', 'aging_30d', 'aging_60d'], true);
         if ($needsPhpSort) {
             // Use default sort for SQL, will sort by avg_7day in PHP after
             $orderBy = 'p.name ASC';
         }
+        $sales7Map = [];
+        $sales30Map = [];
+        $sales60Map = [];
+        $salesRankingSource = 'all_products';
+        if (in_array($sortBy, ['top_sellers_7d', 'top_sellers_30d', 'aging_30d', 'aging_60d'], true)) {
+            // Foundation v1: ranking is Lightspeed-first by using only mapped products.
+            $sales7Map = getInventorySalesTotalsForStore($storeId, 7, null, true);
+            $sales30Map = getInventorySalesTotalsForStore($storeId, 30, null, true);
+            $sales60Map = getInventorySalesTotalsForStore($storeId, 60, null, true);
+
+            $hasMappedSales = false;
+            foreach ([$sales7Map, $sales30Map, $sales60Map] as $map) {
+                foreach ($map as $qty) {
+                    if ((float)$qty > 0) {
+                        $hasMappedSales = true;
+                        break 2;
+                    }
+                }
+            }
+            if ($hasMappedSales) {
+                $salesRankingSource = 'lightspeed_mapped';
+            } else {
+                // Temporary safety fallback until mapped sales is fully populated.
+                $sales7Map = getInventorySalesTotalsForStore($storeId, 7, null, false);
+                $sales30Map = getInventorySalesTotalsForStore($storeId, 30, null, false);
+                $sales60Map = getInventorySalesTotalsForStore($storeId, 60, null, false);
+                $salesRankingSource = 'all_products_fallback';
+            }
+        }
         
+        $whereClauses = ["i.store_id = ?"];
+        $params = [(int)$storeId];
+        if ($filterCategory !== '' && strcasecmp($filterCategory, 'all') !== 0) {
+            $whereClauses[] = "EXISTS (
+                SELECT 1
+                FROM product_category_map pcmf
+                JOIN product_categories pcf ON pcf.id = pcmf.category_id
+                WHERE pcmf.product_id = i.product_id
+                  AND LOWER(pcf.name) = LOWER(?)
+            )";
+            $params[] = $filterCategory;
+        }
+        if ($filterUnitType !== '' && strcasecmp($filterUnitType, 'all') !== 0) {
+            $whereClauses[] = "LOWER(COALESCE(p.unit_type, '')) = LOWER(?)";
+            $params[] = $filterUnitType;
+        }
+        $whereSql = implode(' AND ', $whereClauses);
+
         $stmt = $pdo->prepare("
             SELECT i.*, p.sku, p.name as product_name, p.unit_type, 
                    v.name as vendor_name, v.phone as vendor_phone, v.email as vendor_email, v.rating as vendor_rating,
-                   sub.sku as substitution_sku, sub.name as substitution_name
+                   sub.sku as substitution_sku, sub.name as substitution_name,
+                   lpm.external_id as lightspeed_external_id,
+                   (
+                       SELECT string_agg(pc.name, ', ' ORDER BY pc.name)
+                       FROM product_category_map pcm
+                       JOIN product_categories pc ON pc.id = pcm.category_id
+                       WHERE pcm.product_id = i.product_id
+                   ) as category_names
             FROM inventory i
             JOIN products p ON i.product_id = p.id
             LEFT JOIN vendors v ON i.vendor_id = v.id
             LEFT JOIN products sub ON i.substitution_product_id = sub.id
-            WHERE i.store_id = ?
+            LEFT JOIN lightspeed_product_map lpm ON lpm.product_id = i.product_id
+            WHERE {$whereSql}
             ORDER BY $orderBy
         ");
-        $stmt->execute([$storeId]);
+        $stmt->execute($params);
         $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
         
         // Add pending order info and averages to each item
@@ -245,24 +351,153 @@ function getInventoryForStore($storeId, $sortBy = 'status') {
             $item['has_pending_order'] = !empty($pendingOrders[$pid]);
             $item['avg_7day_sales'] = $averages[$pid]['avg_7day'] ?? null;
             $item['avg_30day_sales'] = $averages[$pid]['avg_30day'] ?? null;
+            $item['sales_7day_total'] = isset($sales7Map[$pid]) ? (float)$sales7Map[$pid] : 0.0;
+            $item['sales_30day_total'] = isset($sales30Map[$pid]) ? (float)$sales30Map[$pid] : 0.0;
+            $item['sales_60day_total'] = isset($sales60Map[$pid]) ? (float)$sales60Map[$pid] : 0.0;
+            $item['is_lightspeed_mapped'] = !empty($item['lightspeed_external_id']);
+            $item['sales_rank_source'] = $salesRankingSource;
         }
         
         // Sort by 7-day average if requested (after adding averages)
         if ($needsPhpSort) {
-            usort($items, function($a, $b) {
+            usort($items, function($a, $b) use ($sortBy) {
+                if ($sortBy === 'top_sellers_7d') {
+                    $aVal = (float)($a['sales_7day_total'] ?? 0);
+                    $bVal = (float)($b['sales_7day_total'] ?? 0);
+                    if ($aVal === $bVal) {
+                        $aMapped = !empty($a['is_lightspeed_mapped']) ? 1 : 0;
+                        $bMapped = !empty($b['is_lightspeed_mapped']) ? 1 : 0;
+                        if ($aMapped !== $bMapped) return $bMapped <=> $aMapped;
+                    }
+                    if ($aVal === $bVal) return strcmp((string)($a['product_name'] ?? ''), (string)($b['product_name'] ?? ''));
+                    return $bVal <=> $aVal;
+                }
+                if ($sortBy === 'top_sellers_30d') {
+                    $aVal = (float)($a['sales_30day_total'] ?? 0);
+                    $bVal = (float)($b['sales_30day_total'] ?? 0);
+                    if ($aVal === $bVal) {
+                        $aMapped = !empty($a['is_lightspeed_mapped']) ? 1 : 0;
+                        $bMapped = !empty($b['is_lightspeed_mapped']) ? 1 : 0;
+                        if ($aMapped !== $bMapped) return $bMapped <=> $aMapped;
+                    }
+                    if ($aVal === $bVal) return strcmp((string)($a['product_name'] ?? ''), (string)($b['product_name'] ?? ''));
+                    return $bVal <=> $aVal;
+                }
+                if ($sortBy === 'aging_30d') {
+                    $aVal = (float)($a['sales_30day_total'] ?? 0);
+                    $bVal = (float)($b['sales_30day_total'] ?? 0);
+                    if ($aVal === $bVal) {
+                        $aMapped = !empty($a['is_lightspeed_mapped']) ? 1 : 0;
+                        $bMapped = !empty($b['is_lightspeed_mapped']) ? 1 : 0;
+                        if ($aMapped !== $bMapped) return $bMapped <=> $aMapped;
+                        $aOnHand = (float)($a['on_hand'] ?? 0);
+                        $bOnHand = (float)($b['on_hand'] ?? 0);
+                        if ($aOnHand === $bOnHand) return strcmp((string)($a['product_name'] ?? ''), (string)($b['product_name'] ?? ''));
+                        return $bOnHand <=> $aOnHand;
+                    }
+                    return $aVal <=> $bVal;
+                }
+                if ($sortBy === 'aging_60d') {
+                    $aVal = (float)($a['sales_60day_total'] ?? 0);
+                    $bVal = (float)($b['sales_60day_total'] ?? 0);
+                    if ($aVal === $bVal) {
+                        $aMapped = !empty($a['is_lightspeed_mapped']) ? 1 : 0;
+                        $bMapped = !empty($b['is_lightspeed_mapped']) ? 1 : 0;
+                        if ($aMapped !== $bMapped) return $bMapped <=> $aMapped;
+                        $aOnHand = (float)($a['on_hand'] ?? 0);
+                        $bOnHand = (float)($b['on_hand'] ?? 0);
+                        if ($aOnHand === $bOnHand) return strcmp((string)($a['product_name'] ?? ''), (string)($b['product_name'] ?? ''));
+                        return $bOnHand <=> $aOnHand;
+                    }
+                    return $aVal <=> $bVal;
+                }
                 $avgA = $a['avg_7day_sales'] ?? 0;
                 $avgB = $b['avg_7day_sales'] ?? 0;
-                if ($avgA == $avgB) {
-                    // Secondary sort by product name
-                    return strcmp($a['product_name'], $b['product_name']);
-                }
-                return $avgB <=> $avgA; // Descending (highest first)
+                if ($avgA == $avgB) return strcmp((string)($a['product_name'] ?? ''), (string)($b['product_name'] ?? ''));
+                return $avgB <=> $avgA;
             });
         }
         
         return $items;
     } catch (PDOException $e) {
         error_log("Error getting inventory: " . $e->getMessage());
+        return [];
+    }
+}
+
+function getInventorySalesTotalsForStore($storeId, $days = 30, $asOfDate = null, $lightspeedMappedOnly = false) {
+    $lightspeedMappedOnly = (bool)$lightspeedMappedOnly;
+    $days = max(1, min(365, (int)$days));
+    if ($asOfDate === null) {
+        $asOfDate = date('Y-m-d');
+    }
+    try {
+        $pdo = getDB();
+        $endDate = new DateTime($asOfDate);
+        $startDate = clone $endDate;
+        $startDate->modify('-' . ($days - 1) . ' days');
+        $joinMap = $lightspeedMappedOnly ? "INNER JOIN lightspeed_product_map lpm ON lpm.product_id = pds.product_id" : "";
+        $stmt = $pdo->prepare("
+            SELECT pds.product_id, COALESCE(SUM(pds.quantity_sold), 0) as qty
+            FROM product_daily_sales pds
+            {$joinMap}
+            WHERE pds.store_id = ?
+              AND pds.sale_date >= ?
+              AND pds.sale_date <= ?
+            GROUP BY pds.product_id
+        ");
+        $stmt->execute([$storeId, $startDate->format('Y-m-d'), $endDate->format('Y-m-d')]);
+        $map = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $map[(int)$row['product_id']] = (float)($row['qty'] ?? 0);
+        }
+        return $map;
+    } catch (PDOException $e) {
+        error_log("Error getting inventory sales totals: " . $e->getMessage());
+        return [];
+    }
+}
+
+function getLightspeedSyncLatestRuns($limit = 10) {
+    try {
+        $pdo = getDB();
+        $limit = max(1, min(50, (int)$limit));
+        $stmt = $pdo->prepare("
+            SELECT id, provider, entity_name, mode_name, status, records_seen, records_upserted, records_failed, message, started_at, ended_at, started_by
+            FROM integration_sync_runs
+            WHERE provider = 'lightspeed_x'
+            ORDER BY id DESC
+            LIMIT {$limit}
+        ");
+        $stmt->execute();
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        error_log('getLightspeedSyncLatestRuns error: ' . $e->getMessage());
+        return [];
+    }
+}
+
+function getLightspeedSyncLatestRunByEntity() {
+    try {
+        $pdo = getDB();
+        $stmt = $pdo->query("
+            SELECT DISTINCT ON (entity_name)
+                id, provider, entity_name, mode_name, status, records_seen, records_upserted, records_failed, message, started_at, ended_at, started_by
+            FROM integration_sync_runs
+            WHERE provider = 'lightspeed_x'
+            ORDER BY entity_name, id DESC
+        ");
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $out = [];
+        foreach ($rows as $row) {
+            $key = (string)($row['entity_name'] ?? '');
+            if ($key !== '') {
+                $out[$key] = $row;
+            }
+        }
+        return $out;
+    } catch (Throwable $e) {
+        error_log('getLightspeedSyncLatestRunByEntity error: ' . $e->getMessage());
         return [];
     }
 }

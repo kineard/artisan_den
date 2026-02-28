@@ -6,6 +6,7 @@ if (!isset($products)) $products = [];
 if (!isset($vendors)) $vendors = [];
 if (!isset($orders)) $orders = [];
 if (!isset($inventorySort)) $inventorySort = 'status';
+if (!isset($inventorySalesRankingSource)) $inventorySalesRankingSource = 'all_products';
 $dateArray = $dateArray ?? [];
 $otherDates = isset($inventoryTableDates) && !empty($inventoryTableDates) ? $inventoryTableDates : $dateArray;
 $snapshotsMap = $snapshotsMap ?? [];
@@ -31,7 +32,25 @@ $invColspan = 17 + (2 * count($otherDates));
 <!-- Inventory List -->
 <div class="inventory-section">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-        <h3>Inventory & Reorder List</h3>
+        <h3>
+            Inventory & Reorder List
+            <?php if (($inventorySort ?? 'status') === 'top_sellers_30d'): ?>
+                <small style="font-weight: 500; color: #475467;">(Sorted by sold units, last 30 days)</small>
+            <?php elseif (($inventorySort ?? 'status') === 'top_sellers_7d'): ?>
+                <small style="font-weight: 500; color: #475467;">(Sorted by sold units, last 7 days)</small>
+            <?php elseif (($inventorySort ?? 'status') === 'aging_30d'): ?>
+                <small style="font-weight: 500; color: #475467;">(Lowest sellers, last 30 days)</small>
+            <?php elseif (($inventorySort ?? 'status') === 'aging_60d'): ?>
+                <small style="font-weight: 500; color: #475467;">(Lowest sellers, last 60 days)</small>
+            <?php endif; ?>
+            <?php if (in_array(($inventorySort ?? 'status'), ['top_sellers_7d', 'top_sellers_30d', 'aging_30d', 'aging_60d'], true)): ?>
+                <?php if (($inventorySalesRankingSource ?? 'all_products') === 'lightspeed_mapped'): ?>
+                    <small style="font-weight: 500; color: #475467;">(Source: Lightspeed-mapped products)</small>
+                <?php elseif (($inventorySalesRankingSource ?? 'all_products') === 'all_products_fallback'): ?>
+                    <small style="font-weight: 500; color: #b54708;">(Fallback: all products until Lightspeed sales history fills in)</small>
+                <?php endif; ?>
+            <?php endif; ?>
+        </h3>
         
     </div>
     <div class="inventory-table-wrapper">
@@ -121,7 +140,7 @@ $invColspan = 17 + (2 * count($otherDates));
                     ?>
                         <tr class="status-<?php echo strtolower($status); ?>" data-inventory-id="<?php echo $item['id']; ?>" data-product-id="<?php echo $item['product_id']; ?>" data-reorder-point="<?php echo htmlspecialchars($item['reorder_point'] ?? 0); ?>">
                             <td class="inventory-td-sku">
-                                <a href="?action=<?php echo htmlspecialchars($action ?? 'dashboard'); ?>&amp;store=<?php echo (int)($storeId ?? 0); ?>&amp;date=<?php echo htmlspecialchars($date ?? ''); ?>&amp;view=<?php echo htmlspecialchars($view ?? 'week'); ?>&amp;tab=inventory&amp;chart_product_id=<?php echo (int)$pid; ?>&amp;chart_days=<?php echo (int)$chartDays; ?>#inventory-chart" class="sku-chart-link" title="View this product in the chart below"><?php echo htmlspecialchars($item['sku']); ?></a>
+                                <a href="?action=<?php echo htmlspecialchars($action ?? 'dashboard'); ?>&amp;store=<?php echo (int)($storeId ?? 0); ?>&amp;date=<?php echo htmlspecialchars($date ?? ''); ?>&amp;view=<?php echo htmlspecialchars($view ?? 'week'); ?>&amp;tab=inventory&amp;chart_product_id=<?php echo (int)$pid; ?>&amp;chart_days=<?php echo (int)$chartDays; ?>&amp;inventory_sort=<?php echo urlencode((string)($inventorySort ?? 'status')); ?>&amp;inventory_limit=<?php echo urlencode((string)($inventoryLimit ?? '10')); ?>&amp;inventory_category=<?php echo urlencode((string)($inventoryCategory ?? 'all')); ?>&amp;inventory_unit_type=<?php echo urlencode((string)($inventoryUnitType ?? 'all')); ?>#inventory-chart" class="sku-chart-link" title="View this product in the chart below"><?php echo htmlspecialchars($item['sku']); ?></a>
                             </td>
                             <?php foreach ($otherDates as $d):
                                 $salesVal = isset($salesMap[$pid][$d]) ? $salesMap[$pid][$d] : '';

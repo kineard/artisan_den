@@ -1,4 +1,4 @@
-.PHONY: dev start stop help check-db seed migrate-timeclock seed-timeclock
+.PHONY: dev start stop help check-db seed migrate-inventory migrate-timeclock seed-timeclock lint-php laptop-check
 
 # Default port
 PORT ?= 8001
@@ -15,8 +15,16 @@ check-db:
 		echo "PostgreSQL is already running."; \
 	fi
 
+# Run PHP syntax checks before serving
+lint-php:
+	@echo "Running PHP syntax check..."
+	@for file in $$(git ls-files '*.php'); do \
+		php -l "$$file" >/dev/null || exit 1; \
+	done
+	@echo "PHP syntax check passed."
+
 # Start development server
-dev: check-db
+dev: check-db lint-php
 	@echo "Starting PHP development server on port $(PORT)..."
 	@php -S localhost:$(PORT) -t .
 
@@ -32,11 +40,6 @@ stop:
 seed: check-db
 	@echo "Seeding database with sample data..."
 	@php seed-data.php
-
-# Migrate inventory schema updates
-migrate-inventory: check-db
-	@echo "Running inventory schema updates..."
-	@PGPASSWORD=artisan_pass_123 psql -h localhost -U artisan_user -d artisan_den -f database/migrate-inventory-updates.sql
 
 # Migrate inventory schema updates
 migrate-inventory: check-db
@@ -58,6 +61,14 @@ seed-timeclock: check-db migrate-timeclock
 	@echo "Seeding Time Clock demo employees..."
 	@php seed-timeclock.php
 
+# Laptop data check: table counts, report, legacy export
+laptop-check: check-db
+	@echo "Running laptop data check..."
+	@php run-laptop-check-standalone.php
+	@echo "Report: docs/reports/laptop-data-check.md"
+	@echo "Export: artifacts/legacy-export/legacy-pos-tables.sql"
+	@echo "README: artifacts/legacy-export/README.md"
+
 # Show help
 help:
 	@echo "Available commands:"
@@ -66,8 +77,10 @@ help:
 	@echo "  make stop          - Stop the PHP development server"
 	@echo "  make seed          - Seed database with sample KPI data"
 	@echo "  make seed-inventory - Seed database with inventory, products, and vendors"
+	@echo "  make lint-php      - Run PHP syntax checks for tracked PHP files"
 	@echo "  make migrate-timeclock - Run Time Clock schema migration"
 	@echo "  make seed-timeclock - Seed Time Clock demo employees and PINs"
+	@echo "  make laptop-check  - Table counts, report, legacy export"
 	@echo "  make help          - Show this help message"
 	@echo ""
 	@echo "To use a different port: PORT=8080 make dev"

@@ -67,17 +67,17 @@ body > .container {
     color: #fff;
 }
 .header > div:first-child {
-    display: flex;
-    align-items: center;
-    gap: 20px;
-    flex: 1;
+    display: block;
+    flex: 0 0 auto;
 }
 .header-controls {
     display: flex;
-    flex-direction: row;
-    gap: 15px;
-    align-items: center;
-    flex-shrink: 0;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-end;
+    flex: 1;
+    min-width: 0;
+    flex-wrap: nowrap;
 }
 .view-selector {
     display: flex;
@@ -108,9 +108,11 @@ body > .container {
     white-space: nowrap;
 }
 .store-selector {
-    display: flex;
-    gap: 10px;
+    display: grid;
+    grid-auto-rows: auto;
+    gap: 4px;
     margin: 0;
+    justify-items: center;
 }
 .store-pill {
     padding: 6px 12px;
@@ -161,28 +163,88 @@ body > .container {
 }
 .inventory-hero-controls {
     display: inline-flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 8px;
     flex-wrap: wrap;
 }
+.header-controls .control-stack,
 .inventory-hero-form {
+    display: grid;
+    grid-template-rows: auto auto;
+    justify-items: center;
+    align-content: end;
+    gap: 4px;
+}
+.store-block {
+    min-width: 180px;
+    margin-right: 8px;
+}
+.store-block .store-selector .store-pill {
+    min-width: 86px;
+    text-align: center;
+}
+.header-controls .control-stack {
+    min-width: 116px;
+}
+.inventory-hero-form {
+    min-width: 106px;
+}
+.header-controls .control-stack > label,
+.store-block > label,
+.inventory-hero-form label {
+    display: block;
+    width: 100%;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.1;
+    margin: 0;
+    color: #000;
+}
+.control-input-row {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
 }
-.inventory-hero-form label {
-    font-size: 13px;
-    color: #000;
-    font-weight: 600;
-}
+.header-controls .control-stack select,
+.header-controls .control-stack input[type="date"],
 .inventory-hero-form select {
     color: #000;
     background: #fff;
-    padding: 4px 8px;
-    border: 1px solid #ddd;
-    border-radius: 4px;
+    border: 1px solid #98a2b3;
+    border-radius: 6px;
     font-size: 13px;
     min-height: 32px;
+    padding: 4px 8px;
+}
+.header-controls .control-stack select {
+    min-width: 104px;
+}
+.header-controls .control-stack input[type="date"] {
+    min-width: 120px;
+}
+.inventory-hero-form select {
+    min-width: 96px;
+}
+.inventory-action-stack {
+    display: grid;
+    grid-template-rows: auto auto;
+    gap: 4px;
+    align-content: end;
+}
+.inventory-action-stack .inventory-hero-btn,
+.inventory-action-stack .vendor-edit-dropdown .btn-vendor-edit {
+    min-height: 32px;
+}
+.inventory-action-stack .inventory-hero-btn {
+    min-width: 118px;
+}
+.inventory-action-stack .vendor-edit-dropdown {
+    margin: 0;
+}
+.inventory-action-stack .vendor-edit-dropdown .vendor-edit-label {
+    display: none;
 }
 .inventory-hero-btn {
     min-height: 32px;
@@ -724,6 +786,102 @@ body > .container {
     font-size: 18px;
     color: #000;
     margin: 0;
+}
+.inventory-sync-health {
+    border: 1px solid #d5dbe6;
+    background: #f8fafc;
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+}
+.inventory-sync-health-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    color: #101828;
+    font-size: 13px;
+}
+.inventory-sync-health-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+.inventory-sync-health-parity {
+    margin-top: 8px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    padding: 6px 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 12px;
+    color: #334155;
+}
+.inventory-sync-health-parity strong {
+    font-size: 12px;
+}
+.inventory-sync-health-parity-ok {
+    background: #ecfdf3;
+    border-color: #86efac;
+    color: #14532d;
+}
+.inventory-sync-health-parity-warning {
+    background: #fffbeb;
+    border-color: #fcd34d;
+    color: #78350f;
+}
+.inventory-sync-readiness-chip {
+    margin-left: auto;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 12px;
+    font-weight: 700;
+    background: #f8fafc;
+    color: #334155;
+}
+.inventory-sync-readiness-chip.is-ready {
+    border-color: #22c55e;
+    background: #dcfce7;
+    color: #14532d;
+}
+.inventory-sync-readiness-chip.is-not-ready {
+    border-color: #f59e0b;
+    background: #fef3c7;
+    color: #78350f;
+}
+.inventory-sync-chip {
+    border: 1px solid #d0d7e2;
+    background: #fff;
+    border-radius: 999px;
+    padding: 4px 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #1f2937;
+}
+.inventory-sync-chip em {
+    font-style: normal;
+    font-weight: 700;
+    color: #344054;
+}
+.inventory-sync-chip small {
+    color: #475467;
+}
+.inventory-sync-health-ok {
+    border-color: #16a34a33;
+    background: #f0fdf4;
+}
+.inventory-sync-health-warning {
+    border-color: #f59e0b55;
+    background: #fffbeb;
+}
+.inventory-sync-health-error {
+    border-color: #ef444455;
+    background: #fef2f2;
 }
 .inventory-actions {
     display: flex;
@@ -2166,9 +2324,29 @@ body.lane-dragging {
         flex-direction: column;
         align-items: flex-start;
     }
-    .header-controls {
+    .app-hero {
+        display: flex;
+        flex-direction: column;
         align-items: flex-start;
+    }
+    .header-controls,
+    .app-hero .header-controls {
+        align-items: flex-start;
+        display: flex;
+        flex-direction: column;
         width: 100%;
+    }
+    .header-options-center,
+    .header-actions-right {
+        justify-self: auto;
+        width: 100%;
+        justify-content: flex-start;
+        display: flex;
+        flex-wrap: wrap;
+        margin-left: 0;
+    }
+    .inventory-hero-controls {
+        flex-wrap: wrap;
     }
     .spreadsheet-wrapper {
         max-height: calc(100vh - 400px);
@@ -3341,6 +3519,23 @@ html.high-contrast .app-kpi-meta-bar {
 html.high-contrast .inventory-hero-form label {
     color: #f8fbff;
 }
+html.high-contrast .control-stack > label {
+    color: #f8fbff;
+}
+html.high-contrast .store-block > label {
+    color: #f8fbff;
+}
+html.high-contrast .header-controls .control-stack > label,
+html.high-contrast .inventory-hero-form label {
+    color: #0f172a !important;
+    font-weight: 800;
+}
+html.high-contrast .header-controls .control-stack select,
+html.high-contrast .header-controls .control-stack input[type="date"] {
+    border-color: #8ca9cb;
+    background: #101a28;
+    color: #f8fbff;
+}
 html.high-contrast .inventory-hero-form select {
     border-color: #8ca9cb;
     background: #101a28;
@@ -4399,3 +4594,5 @@ html.high-contrast .spreadsheet-table th.date-col.is-weekend .date-month {
         max-width: min(96vw, 96vw) !important;
     }
 }
+
+
