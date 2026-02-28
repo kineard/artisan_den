@@ -33,5 +33,7 @@
 
 ## Export
 - **File:** artifacts/legacy-export/legacy-pos-tables.sql
-- **Export UTC:** 2026-02-28T21:34:21Z
-- **Created:** already existed
+- **Export UTC:** 2026-02-28T21:39:36Z
+- **Created:** created by this run
+
+Run: `bash run-laptop-check.sh` in WSL to refresh.
