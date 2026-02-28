@@ -15,7 +15,9 @@ config.php
 # Logs and debug
 *.log
 server.log
-.cursor/
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 
 # OS and editor
 .DS_Store

@@ -1,0 +1,22 @@
+---
+description: Core project governance and anti-drift rules
+alwaysApply: true
+---
+
+# Core Governance (Always On)
+
+- Launch 1 scope is locked to: KPI, Inventory/Reorder, Time Clock.
+- POS checkout flow (cart, tenders, returns, receipts) is deferred until explicitly approved.
+- Keep architecture multi-location now and multi-tenant ready.
+- If a request conflicts with scope, call it out and ask for explicit approval before implementing.
+
+## Rule #1: Unknowns
+
+- If the answer is unknown, do not guess.
+- Say what is unknown, what asset is needed, and propose the fastest way to get it.
+- Valid assets include schema snapshots, sample reports, production behavior examples, and business rules.
+
+## Delivery Style
+
+- Explain decisions in plain business language first, then technical details.
+- Favor stable, maintainable best practices over short-term hacks.

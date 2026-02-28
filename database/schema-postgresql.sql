@@ -34,6 +34,6 @@ CREATE TABLE IF NOT EXISTS lightspeed_imports (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 INSERT INTO stores (name) VALUES ('23rd St'), ('Pier Park') ON CONFLICT (name) DO NOTHING;
-CREATE OR REPLACE FUNCTION update_updated_at_column() RETURNS TRIGGER AS \$\$ BEGIN NEW.updated_at = CURRENT_TIMESTAMP; RETURN NEW; END; \$\$ language 'plpgsql';
+CREATE OR REPLACE FUNCTION update_updated_at_column() RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = CURRENT_TIMESTAMP; RETURN NEW; END; $$ language 'plpgsql';
 DROP TRIGGER IF EXISTS update_daily_kpis_updated_at ON daily_kpis;
 CREATE TRIGGER update_daily_kpis_updated_at BEFORE UPDATE ON daily_kpis FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

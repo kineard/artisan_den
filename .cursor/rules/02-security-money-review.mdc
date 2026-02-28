@@ -1,0 +1,26 @@
+---
+description: Security, money safety, and mandatory human review gates
+alwaysApply: true
+---
+
+# Security and Money Review Gates
+
+- Enforce strict auth and role checks for all write actions.
+- Never use floating-point math for money paths.
+- Keep tenant and location scoping explicit in reads and writes.
+
+## Mandatory Human Review
+
+Do not treat these as auto-merge safe. Require human senior-dev review for changes touching:
+
+- money calculations or money schema
+- payroll logic and exports
+- inventory reorder formulas
+- auth, policy, or permission logic
+- tenant/location scoping logic
+- data migrations that transform business data
+
+## Safe Change Pattern
+
+- Include risk level (low/medium/high) in PR or handoff notes.
+- Include test evidence and rollback approach for high-risk changes.

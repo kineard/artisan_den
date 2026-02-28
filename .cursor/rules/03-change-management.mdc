@@ -1,0 +1,23 @@
+---
+description: Change management, notes, and commit hygiene
+alwaysApply: true
+---
+
+# Change Management Standards
+
+- Work in small, reviewable slices.
+- Keep one logical change per commit when possible.
+- Do not include unrelated refactors with business logic changes.
+
+## Commit and Handoff Notes
+
+- Commit messages should explain intent and business impact.
+- For risky changes, include a short rollback note.
+- Add concise code comments where business rules are non-obvious.
+- Prefer "why" comments over "what" comments.
+
+## Definition of Done (per change)
+
+- Behavior is verified with a quick test or smoke check.
+- Access control and scope boundaries are preserved.
+- Docs are updated when behavior or decisions change.
