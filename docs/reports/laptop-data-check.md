@@ -33,5 +33,5 @@
 
 ## Export
 - **File:** artifacts/legacy-export/legacy-pos-tables.sql
-- **Export UTC:** 2026-02-28T21:23:13Z
+- **Export UTC:** 2026-02-28T21:34:21Z
 - **Created:** already existed

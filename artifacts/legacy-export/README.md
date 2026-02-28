@@ -1,7 +1,7 @@
 # Legacy POS Tables Export
 
 - **Database:** artisan_den
-- **Export UTC:** 2026-02-28T21:23:13Z
+- **Export UTC:** 2026-02-28T21:34:21Z
 - **Row counts:**
 
 | Table | Rows |
